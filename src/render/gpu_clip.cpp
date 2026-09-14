@@ -5,6 +5,7 @@
 #include "shaders/generated/clip_continuous_portable.hpp"
 #include "shaders/generated/spans_portable.hpp"
 #include <cstring>
+#include <bit>
 #include <stdexcept>
 #endif
 namespace starfox::render {
@@ -116,7 +117,7 @@ void* GpuClip::enqueue(void* device,void* command,void* points,void* corners,
     return nullptr;
 #endif
 }
-void* GpuClip::enqueue_spans(void* command,void* materials,bool winding_independent,std::uint32_t render_scale,const GpuSpanOrder* order,std::uint32_t line_thickness,void* source_texels,std::uint32_t source_texel_bytes,void** masked_texels) {
+void* GpuClip::enqueue_spans(void* command,void* materials,bool winding_independent,std::uint32_t render_scale,const GpuSpanOrder* order,std::uint32_t line_thickness,void* source_texels,std::uint32_t source_texel_bytes,void** masked_texels,std::array<std::uint32_t,2> raster_size) {
     if(masked_texels) *masked_texels=nullptr;
 #if defined(STARFOX_SDL_GPU_EFFECTS)
     try {
@@ -131,7 +132,10 @@ void* GpuClip::enqueue_spans(void* command,void* materials,bool winding_independ
             throw std::runtime_error("Invalid or aliased BSP span order");
         const auto& s=impl_->settings;
         const auto slots=order?order->capacity:s.polygon_count;
-        const auto width=Uint32(s.width)*render_scale,height=Uint32(s.height)*render_scale;
+        const bool custom=raster_size[0] || raster_size[1];
+        if(custom && (!raster_size[0] || !raster_size[1] || !impl_->continuous))
+            throw std::runtime_error("Custom raster size requires continuous geometry and two positive dimensions");
+        const auto width=custom?raster_size[0]:Uint32(s.width)*render_scale,height=custom?raster_size[1]:Uint32(s.height)*render_scale;
         if(width>32767 || height>32767) throw std::runtime_error("Scaled span viewport exceeds fixed-point bounds");
         const auto bytes=std::uint64_t(slots)*height*96;
         if(bytes>256U*1024*1024) throw std::runtime_error("Solid span batch exceeds 256 MiB scratch budget");
@@ -164,7 +168,8 @@ void* GpuClip::enqueue_spans(void* command,void* materials,bool winding_independ
         const Uint32 settings[]{slots,width,height,winding_independent?1U:0U,
             render_scale,impl_->continuous?1U:0U,order?1U:0U,s.polygon_count,
             order?order->first:0U,order?order->tree_index:0U,line_thickness,0,
-            masked_texels?1U:0U,source_texel_bytes,mask_stride,0};
+            masked_texels?1U:0U,source_texel_bytes,mask_stride,custom?1U:0U,
+            std::bit_cast<Uint32>(float(width)/s.width),std::bit_cast<Uint32>(float(height)/s.height),0,0};
         SDL_PushGPUComputeUniformData(cmd,0,settings,sizeof(settings));
         SDL_GPUStorageBufferReadWriteBinding bindings[2]{};
         bindings[0].buffer=impl_->spans;bindings[0].cycle=true;

@@ -21,6 +21,7 @@ struct Command {
     uint renderScale;uint fractional;uint orderedMode;uint polygonCount;
     uint orderFirst;uint orderTree;uint lineThickness;uint padding;
     uint maskEnabled;uint maskOffset;uint maskStride;uint maskPadding;
+    float2 rasterScale;uint2 rasterPadding;
 };
 int word(int v){return (v<<16)>>16;}
 int fixedX(int x){return width>224?x<<8:word(x<<8);}
@@ -35,7 +36,7 @@ int advanceX(int x,int increment){
 int roundAway(float value){return value<0?-int(floor(-value+0.5)):int(floor(value+0.5));}
 int2 pointAt(uint base,uint vertex){
     int4 raw=clipped[base+1+vertex];
-    float2 value=asfloat(raw.xy)*float(renderScale);
+    float2 value=asfloat(raw.xy)*(maskPadding!=0?rasterScale:float2(renderScale,renderScale));
     int2 xy=fractional!=0?int2(roundAway(value.x),roundAway(value.y)):raw.xy*int(renderScale);
     return clamp(xy,int2(0,0),int2(width,height));
 }
@@ -97,6 +98,21 @@ void main(uint3 id:SV_DispatchThreadID) {
         int depth=int(uint(centre.z)&65535U),sourceWidth=int(material.u_mask+1);
         int increment=clamp((depth*(sourceWidth==64?128:256))>>8,1,32767);
         int extent=sourceWidth*128/increment,scale=int(renderScale);
+        if(maskPadding!=0) {
+            int left=max(0,int(ceil((centre.x-extent)*rasterScale.x)));
+            int right=min(width,int(ceil((centre.x+extent+1)*rasterScale.x)));
+            int top=max(0,int(ceil((centre.y-extent)*rasterScale.y)));
+            int bottom=min(height,int(ceil((centre.y+extent+1)*rasterScale.y)));
+            for(int y=top;y<bottom;++y) {
+                Command span=material;span.left=left;span.right=right;span.top=y;span.bottom=y+1;
+                span.textured=1;span.has_surface=0;
+                span.u=sourceWidth/2*256+roundAway((left/rasterScale.x-centre.x)*increment);
+                span.v=word(sourceWidth/2*256+roundAway((y/rasterScale.y-centre.y)*increment));
+                span.du=roundAway(increment/rasterScale.x);span.dv=0;
+                commands[commandBase+uint(y)]=span;
+            }
+            return;
+        }
         int left=max(0,centre.x-extent),right=min(width/scale-1,centre.x+extent);
         int top=max(0,centre.y-extent),bottom=min(height/scale-1,centre.y+extent);
         if(left>right || top>bottom) return;
@@ -112,6 +128,7 @@ void main(uint3 id:SV_DispatchThreadID) {
         int2 a=pointAt(base,0),b=pointAt(base,1),delta=abs(b-a),step=int2(a.x<b.x?1:-1,a.y<b.y?1:-1);
         bool majorX=delta.x>=delta.y;int major=majorX?delta.x:delta.y,minor=majorX?delta.y:delta.x;
         int error=major>>1,thickness=int(renderScale*clamp(lineThickness,1U,4U)),offset=(thickness-1)/2;
+        if(maskPadding!=0) {thickness=max(1,roundAway(min(rasterScale.x,rasterScale.y)*clamp(lineThickness,1U,4U)));offset=(thickness-1)/2;}
         material.textured=0;material.has_surface=0;material.scroll_x=renderScale;material.scroll_y=0;
         for(int i=0;i<=major;++i) {
             int left=max(0,a.x-offset),right=min(width,a.x-offset+thickness);

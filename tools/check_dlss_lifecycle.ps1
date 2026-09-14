@@ -1,6 +1,7 @@
 param([string]$OutputDirectory='tmp/dlss-game-lifecycle-fixed',[switch]$Evaluate,[switch]$CompareSerialized,[switch]$RequireContinuousHistory,[switch]$CaptureBackground,[switch]$DumpPpu,[switch]$AuditTerrain,
     [ValidateRange(1,10000)][int]$Frames=16,[ValidateRange(20,1000)][int]$PresentationFPS=60,
-    [ValidatePattern('^[A-Za-z0-9_]+$')][string]$Level='LEVEL1_1')
+    [ValidatePattern('^[A-Za-z0-9_]+$')][string]$Level='LEVEL1_1',
+    [ValidateSet('DLAA','QUALITY','BALANCED','PERFORMANCE')][string]$DlssMode='DLAA')
 if($CompareSerialized -and !$Evaluate){throw 'Serialization comparison requires Evaluate'}
 if($AuditTerrain -and (!$Evaluate -or $Frames -lt 2)){throw 'Terrain audit requires Evaluate and at least two frames'}
 $ErrorActionPreference='Stop'
@@ -18,6 +19,7 @@ try {
         STARFOX_TEST_UNPACED='1';STARFOX_TEST_MSU1='0';STARFOX_TEST_TEMPORAL_INPUTS='1';STARFOX_TRACE_GPU='1'
         STARFOX_TEST_DISPLAY_MODE='16_9';STARFOX_TEST_RENDER_SCALE='2';STARFOX_TEST_PRESENTATION_FPS="$PresentationFPS"
         STARFOX_TEST_TIMING_MODE='ORIGINAL';STARFOX_TEST_VSYNC='0';STARFOX_TEST_RAY_TRACING='0';STARFOX_TEST_STEREO_OUTPUT='0'
+        STARFOX_TEST_DLSS_MODE=$DlssMode
         STARFOX_DLSS_ADAPTER=(Resolve-Path build/streamline-probe-msvc/starfox_dlss_native.dll).Path
         STARFOX_DLSS_BINARIES=(Resolve-Path tmp/streamline-sdk-2.14.1/sdk/bin/x64).Path
     }
@@ -52,6 +54,10 @@ try {
                 if($Evaluate -and (!(Select-String -LiteralPath $log -SimpleMatch 'dlss-gameplay: evaluated' -Quiet) -or
                     (Select-String -LiteralPath $log -Pattern 'dlss-gameplay: failed|dlss-sdk-error:' -Quiet))) {throw "Gameplay evaluation failed/missing: $log"}
                 if($Evaluate) {
+                    $expectedMode=@{QUALITY=1;BALANCED=2;PERFORMANCE=3;DLAA=4}[$DlssMode]
+                    if(!(Select-String -LiteralPath $log -Pattern " mode=$expectedMode render=[1-9][0-9]*x[1-9][0-9]*" -Quiet)) {
+                        throw "Requested DLSS mode was not evaluated: $log"
+                    }
                     if($AuditTerrain -and !(Select-String -LiteralPath $log -Pattern 'dlss-terrain-audit: covered=[1-9][0-9]* valid_depth=[1-9][0-9]*' -Quiet)) {
                         throw "Missing usable terrain depth: $log"
                     }

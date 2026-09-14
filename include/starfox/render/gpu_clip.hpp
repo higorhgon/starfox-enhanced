@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <array>
 namespace starfox::render {
 struct NativeClipSettings {
     std::uint32_t polygon_count{},point_count{},corner_count{},visibility_count{};
@@ -68,7 +69,8 @@ public:
     // Mask storage is bounded to 256 MiB and output is null on failure.
     void* enqueue_spans(void* command,void* materials,bool winding_independent=false,std::uint32_t render_scale=1,
         const GpuSpanOrder* order=nullptr,std::uint32_t line_thickness=1,
-        void* source_texels=nullptr,std::uint32_t source_texel_bytes=0,void** masked_texels=nullptr);
+        void* source_texels=nullptr,std::uint32_t source_texel_bytes=0,void** masked_texels=nullptr,
+        std::array<std::uint32_t,2> raster_size={});
     void release_device() noexcept;
     const std::string& status() const noexcept;
 private:

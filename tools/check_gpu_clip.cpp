@@ -299,7 +299,7 @@ int main()try {
     std::size_t fractional_checked=0;double maximum_error=0;
     std::size_t scaled_pixels_checked=0;
     std::size_t near_corners_checked=0;
-    for(bool near_enabled:{false,true}) for(unsigned count:{1U,31U,32U,33U,n,33U}) for(const auto dimensions:{std::array<int,2>{224,192},{398,192},{796,448}}) {
+    for(bool custom_raster:{false,true}) for(bool near_enabled:{false,true}) for(unsigned count:{1U,31U,32U,33U,n,33U}) for(const auto dimensions:{std::array<int,2>{224,192},{398,192},{796,448}}) {
         command=SDL_AcquireGPUCommandBuffer(r.device);require(command);
         starfox::render::NativeClipSettings settings{count,Uint32(points.size()),Uint32(corners.size()),n,dimensions[0],dimensions[1]};
         auto* output=static_cast<SDL_GPUBuffer*>(clip.enqueue(r.device,command,r.buffers[4],r.buffers[1],r.buffers[2],r.buffers[3],settings,true,
@@ -309,16 +309,21 @@ int main()try {
             SDL_CancelGPUCommandBuffer(command);throw std::runtime_error("Span emitter accepted zero render scale");
         }
         const unsigned scale=dimensions[0]==224?1U:dimensions[0]==398?2U:4U;
+        const Uint32 raster_width=custom_raster?Uint32(dimensions[0])*3/2:Uint32(dimensions[0])*scale;
+        const Uint32 raster_height=custom_raster?Uint32(dimensions[1])*3/2:Uint32(dimensions[1])*scale;
         SDL_GPUBuffer* scaled_spans=nullptr;
         if(count==33) {
-            scaled_spans=static_cast<SDL_GPUBuffer*>(clip.enqueue_spans(command,r.buffers[6],scale>1,scale));
+            if(clip.enqueue_spans(command,r.buffers[6],true,scale,nullptr,1,nullptr,0,nullptr,{1,0}))
+                throw std::runtime_error("Span emitter accepted partial raster dimensions");
+            scaled_spans=static_cast<SDL_GPUBuffer*>(clip.enqueue_spans(command,r.buffers[6],custom_raster || scale>1,scale,nullptr,1,nullptr,0,nullptr,
+                custom_raster?std::array<Uint32,2>{raster_width,raster_height}:std::array<Uint32,2>{}));
             if(!scaled_spans){SDL_CancelGPUCommandBuffer(command);throw std::runtime_error(clip.status());}
         }
         copy=SDL_BeginGPUCopyPass(command);require(copy);
         SDL_GPUBufferRegion from{output,0,count*129*16};SDL_GPUTransferBufferLocation to{r.download,0};
         SDL_DownloadFromGPUBuffer(copy,&from,&to);
         if(scaled_spans) {
-            from={scaled_spans,0,count*Uint32(dimensions[1])*scale*96};to.offset=count*129*16;
+            from={scaled_spans,0,count*raster_height*96};to.offset=count*129*16;
             SDL_DownloadFromGPUBuffer(copy,&from,&to);
         }
         SDL_EndGPUCopyPass(copy);
@@ -370,7 +375,8 @@ int main()try {
         }
         if(scaled_spans) {
             const auto* emitted=reinterpret_cast<const starfox::render::RasterCommand*>(words+count*129);
-            starfox::render::RenderSettings render_settings;render_settings.render_scale=scale;
+            starfox::render::RenderSettings render_settings;render_settings.render_scale=custom_raster?1:scale;
+            if(custom_raster) render_settings.focal_length=384;
             starfox::render::SoftwareRenderer renderer(render_settings);
             starfox::render::RenderPose pose;pose.x=.25;pose.y=-.125;pose.z=0;pose.vanish_x=pose.vanish_y=0;
             pose.use_rotation_matrix=true;pose.rotation_matrix={-32768,0,0,0,-32768,0,0,0,-32768};
@@ -386,10 +392,10 @@ int main()try {
                 starfox::assets::TextureImage texture;texture.descriptor=0x4000;texture.u_mask=texture.v_mask=7;
                 texture.texels=texels;texture.coordinates={{{0,0},{0,7},{7,7},{7,0}}};shape.textures.push_back(texture);
                 pose.force_colour=i==32;pose.forced_colour=std::uint8_t(materials[i].even|(materials[i].odd<<4));
-                starfox::render::Framebuffer cpu(dimensions[0],dimensions[1],scale),gpu(dimensions[0]*scale,dimensions[1]*scale);
+                starfox::render::Framebuffer cpu(custom_raster?raster_width:dimensions[0],custom_raster?raster_height:dimensions[1],custom_raster?1:scale),gpu(raster_width,raster_height);
                 renderer.draw(shape,pose,cpu);
                 starfox::render::RasterCommands batch;batch.reset(gpu.width(),gpu.height());batch.texels=texels;
-                const auto rows=Uint32(dimensions[1])*scale;
+                const auto rows=raster_height;
                 batch.commands.assign(emitted+i*rows,emitted+(i+1)*rows);
                 starfox::render::replay_raster_commands(batch,gpu,nullptr);
                 if(cpu.pixels()!=gpu.pixels()) throw std::runtime_error("Fractional scaled span mismatch at scale "+std::to_string(scale));

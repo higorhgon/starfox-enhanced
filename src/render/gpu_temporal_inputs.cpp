@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 #include "shaders/generated/temporal_inputs_portable.hpp"
 #include "shaders/generated/temporal_hud_portable.hpp"
+#include "shaders/generated/temporal_resample_portable.hpp"
 #endif
 namespace starfox::render {
 struct GpuTemporalInputs::Impl {
@@ -13,12 +14,15 @@ struct GpuTemporalInputs::Impl {
     SDL_GPUDevice* device{};SDL_GPUComputePipeline* pipeline{};
     SDL_GPUTexture* textures[3]{};Uint32 width{},height{};
     SDL_GPUComputePipeline* hud_pipeline{};SDL_GPUTexture* hud_texture{};Uint32 hud_width{},hud_height{};
+    SDL_GPUComputePipeline* resample_pipeline{};SDL_GPUTexture* resampled[3]{};Uint32 resample_width{},resample_height{};
     ~Impl() {
         if(!device) return;
         for(auto* texture:textures) if(texture) SDL_ReleaseGPUTexture(device,texture);
         if(pipeline) SDL_ReleaseGPUComputePipeline(device,pipeline);
         if(hud_pipeline) SDL_ReleaseGPUComputePipeline(device,hud_pipeline);
         if(hud_texture) SDL_ReleaseGPUTexture(device,hud_texture);
+        if(resample_pipeline) SDL_ReleaseGPUComputePipeline(device,resample_pipeline);
+        for(auto* texture:resampled) if(texture) SDL_ReleaseGPUTexture(device,texture);
     }
     void initialize(SDL_GPUDevice* d) {
         device=d;SDL_GPUComputePipelineCreateInfo info{};
@@ -38,7 +42,7 @@ struct GpuTemporalInputs::Impl {
         for(unsigned i=0;i<3;++i) {
             SDL_GPUTextureCreateInfo info{};info.type=SDL_GPU_TEXTURETYPE_2D;
             info.format=i==1?SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT:SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
-            info.usage=SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE|SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.usage=SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE|SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ|SDL_GPU_TEXTUREUSAGE_SAMPLER;
             info.width=i==2?1:w;info.height=i==2?1:h;info.layer_count_or_depth=1;info.num_levels=1;
             textures[i]=SDL_CreateGPUTexture(device,&info);if(!textures[i]) throw std::runtime_error(SDL_GetError());
         }
@@ -46,6 +50,54 @@ struct GpuTemporalInputs::Impl {
     }
 #endif
 };
+GpuTemporalResampled GpuTemporalInputs::resample(void* device,void* command,void* color,
+    const GpuTemporalTextures& source,std::uint32_t width,std::uint32_t height) {
+    if(!impl_) impl_=std::make_unique<Impl>();
+#if defined(STARFOX_SDL_GPU_EFFECTS)
+    try {
+        if(!device || source.device!=device || !command || !color || !source.depth || !source.motion ||
+            !width || !height || width>source.width || height>source.height || source.width>4096 || source.height>4096)
+            throw std::runtime_error("Invalid temporal resampling inputs");
+        if(impl_->device && impl_->device!=device) impl_=std::make_unique<Impl>();
+        auto* d=static_cast<SDL_GPUDevice*>(device);impl_->device=d;
+        for(auto* output:impl_->resampled) if(output && (output==color || output==source.depth || output==source.motion))
+            throw std::runtime_error("Aliased temporal resampling inputs");
+        if(!impl_->resample_pipeline) {
+            SDL_GPUComputePipelineCreateInfo info{};const auto formats=SDL_GetGPUShaderFormats(d);
+            if(formats&SDL_GPU_SHADERFORMAT_SPIRV) {info.format=SDL_GPU_SHADERFORMAT_SPIRV;info.code=temporal_resample_shader::spirv;info.code_size=sizeof(temporal_resample_shader::spirv);info.entrypoint="main";}
+            else if(formats&SDL_GPU_SHADERFORMAT_MSL) {info.format=SDL_GPU_SHADERFORMAT_MSL;info.code=reinterpret_cast<const Uint8*>(temporal_resample_shader::metal);info.code_size=sizeof(temporal_resample_shader::metal)-1;info.entrypoint="main0";}
+            else if(formats&SDL_GPU_SHADERFORMAT_DXIL) {info.format=SDL_GPU_SHADERFORMAT_DXIL;info.code=temporal_resample_shader::dxil;info.code_size=sizeof(temporal_resample_shader::dxil);info.entrypoint="main";}
+            else throw std::runtime_error("Temporal resampling requires GPU shaders");
+            info.num_readonly_storage_textures=3;info.num_readwrite_storage_textures=3;info.num_uniform_buffers=1;
+            info.threadcount_x=info.threadcount_y=8;info.threadcount_z=1;
+            impl_->resample_pipeline=SDL_CreateGPUComputePipeline(d,&info);if(!impl_->resample_pipeline) throw std::runtime_error(SDL_GetError());
+        }
+        if(impl_->resample_width!=width || impl_->resample_height!=height) {
+            for(auto*& texture:impl_->resampled) {if(texture) SDL_ReleaseGPUTexture(d,texture);texture=nullptr;}
+            impl_->resample_width=impl_->resample_height=0;
+            const SDL_GPUTextureFormat formats[]{SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,SDL_GPU_TEXTUREFORMAT_R32_FLOAT,SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT};
+            for(unsigned i=0;i<3;++i) {
+                SDL_GPUTextureCreateInfo info{};info.type=SDL_GPU_TEXTURETYPE_2D;info.format=formats[i];
+                info.usage=SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE|SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ|SDL_GPU_TEXTUREUSAGE_SAMPLER;
+                info.width=width;info.height=height;info.layer_count_or_depth=1;info.num_levels=1;
+                impl_->resampled[i]=SDL_CreateGPUTexture(d,&info);if(!impl_->resampled[i]) throw std::runtime_error(SDL_GetError());
+            }
+            impl_->resample_width=width;impl_->resample_height=height;
+        }
+        auto* cb=static_cast<SDL_GPUCommandBuffer*>(command);Uint32 constants[]{source.width,source.height,width,height};
+        SDL_PushGPUComputeUniformData(cb,0,constants,sizeof(constants));
+        SDL_GPUStorageTextureReadWriteBinding outputs[3]{};for(unsigned i=0;i<3;++i) outputs[i].texture=impl_->resampled[i];
+        auto* pass=SDL_BeginGPUComputePass(cb,outputs,3,nullptr,0);if(!pass) throw std::runtime_error(SDL_GetError());
+        SDL_BindGPUComputePipeline(pass,impl_->resample_pipeline);
+        SDL_GPUTexture* inputs[]{static_cast<SDL_GPUTexture*>(color),static_cast<SDL_GPUTexture*>(source.depth),static_cast<SDL_GPUTexture*>(source.motion)};
+        SDL_BindGPUComputeStorageTextures(pass,0,inputs,3);SDL_DispatchGPUCompute(pass,(width+7)/8,(height+7)/8,1);SDL_EndGPUComputePass(pass);
+        return {impl_->resampled[0],{device,impl_->resampled[1],impl_->resampled[2],source.exposure,width,height}};
+    } catch(const std::exception& e) {impl_->status=e.what();}
+#else
+    (void)device;(void)command;(void)color;(void)source;(void)width;(void)height;
+#endif
+    return {};
+}
 void* GpuTemporalInputs::restore_hud(void* device,void* command,void* original,void* reconstructed,
     void* packed,std::uint32_t width,std::uint32_t height) {
     if(!impl_) impl_=std::make_unique<Impl>();

@@ -178,12 +178,59 @@ void check_temporal_hud(SDL_GPUDevice* device) {
     SDL_ReleaseGPUBuffer(device,packed);SDL_ReleaseGPUTransferBuffer(device,upload);SDL_ReleaseGPUTransferBuffer(device,read);
     std::cout<<"Temporal HUD restoration: 128 exact tagged pixels including opaque black; output alias rejected\n";
 }
+void check_temporal_resample(SDL_GPUDevice* device) {
+    constexpr Uint32 w=64,h=4,n=w*h;
+    SDL_GPUTexture* inputs[3]{};
+    const SDL_GPUTextureFormat formats[]{SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,SDL_GPU_TEXTUREFORMAT_R32_FLOAT,SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT};
+    SDL_GPUTextureCreateInfo info{};info.type=SDL_GPU_TEXTURETYPE_2D;info.usage=SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ;
+    info.width=w;info.height=h;info.layer_count_or_depth=1;info.num_levels=1;
+    for(unsigned i=0;i<3;++i) {info.format=formats[i];inputs[i]=SDL_CreateGPUTexture(device,&info);require(inputs[i],"resample inputs");}
+    SDL_GPUTransferBufferCreateInfo ti{SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,n*16,0};auto* upload=SDL_CreateGPUTransferBuffer(device,&ti);
+    ti.usage=SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;auto* read=SDL_CreateGPUTransferBuffer(device,&ti);require(upload && read,"resample transfer");
+    auto* bytes=static_cast<unsigned char*>(SDL_MapGPUTransferBuffer(device,upload,false));require(bytes,"resample map");
+    for(unsigned i=0;i<n;++i) {
+        const Uint32 color=0xff804020;const float z=i%2?0.2f:0.8f;
+        const float m[]{i%4==3?-std::numeric_limits<float>::max():float(i%2?4:12),i%4==3?-std::numeric_limits<float>::max():-2.f};
+        std::memcpy(bytes+i*4,&color,4);std::memcpy(bytes+n*4+i*4,&z,4);std::memcpy(bytes+n*8+i*8,m,8);
+    }
+    SDL_UnmapGPUTransferBuffer(device,upload);
+    auto* command=SDL_AcquireGPUCommandBuffer(device);auto* pass=SDL_BeginGPUCopyPass(command);
+    for(unsigned i=0;i<3;++i) {SDL_GPUTextureTransferInfo t{upload,i==2?n*8:i*n*4,w,h};SDL_GPUTextureRegion r{};r.texture=inputs[i];r.w=w;r.h=h;r.d=1;SDL_UploadToGPUTexture(pass,&t,&r,false);}
+    SDL_EndGPUCopyPass(pass);require(SDL_SubmitGPUCommandBuffer(command),"resample upload");
+    starfox::render::GpuTemporalInputs converter;
+    const starfox::render::GpuTemporalTextures guides{device,inputs[1],inputs[2],nullptr,w,h};
+    for(Uint32 target_width:{32u,43u,64u,32u}) {
+        const Uint32 target_height=2;
+        command=SDL_AcquireGPUCommandBuffer(device);
+        require(!converter.resample(device,command,inputs[0],guides,w+1,h).color,"resample accepted enlargement");
+        auto result=converter.resample(device,command,inputs[0],guides,target_width,target_height);require(result.color,converter.status().c_str());
+        require(!converter.resample(device,command,result.color,guides,target_width,target_height).color,"resample accepted alias");
+        pass=SDL_BeginGPUCopyPass(command);
+        void* textures[]{result.color,result.guides.depth,result.guides.motion};
+        for(unsigned i=0;i<3;++i) {SDL_GPUTextureTransferInfo t{read,i==2?n*8:i*n*4,w,target_height};SDL_GPUTextureRegion r{};r.texture=static_cast<SDL_GPUTexture*>(textures[i]);r.w=target_width;r.h=target_height;r.d=1;SDL_DownloadFromGPUTexture(pass,&r,&t);}
+        SDL_EndGPUCopyPass(pass);auto* fence=SDL_SubmitGPUCommandBufferAndAcquireFence(command);require(fence,"resample submit");require(SDL_WaitForGPUFences(device,true,&fence,1),"resample wait");SDL_ReleaseGPUFence(device,fence);
+        const auto* data=static_cast<const unsigned char*>(SDL_MapGPUTransferBuffer(device,read,false));require(data,"resample download");
+        for(unsigned y=0;y<target_height;++y) for(unsigned x=0;x<target_width;++x) {
+            const unsigned i=y*w+x;Uint32 color;float z,m[2];std::memcpy(&color,data+i*4,4);std::memcpy(&z,data+n*4+i*4,4);std::memcpy(m,data+n*8+i*8,8);
+            require(color==0xff804020,"resample constant color");
+            const double ratio=double(w)/target_width;const unsigned first=unsigned(std::floor(x*ratio)),last=unsigned(std::ceil((x+1)*ratio));
+            unsigned chosen=first;for(unsigned s=first;s<last;++s) if((s%2?0.2f:0.8f)<(chosen%2?0.2f:0.8f)) chosen=s;
+            require(std::abs(z-(chosen%2?0.2f:0.8f))<1e-6f,"resample nearest depth");
+            if(chosen%4==3) require(m[0]==-std::numeric_limits<float>::max() && m[1]==m[0],"resample invalid sentinel");
+            else require(std::abs(m[0]-float(chosen%2?4:12)/ratio)<1e-5 && std::abs(m[1]+1.f)<1e-5,"resample scaled paired motion");
+        }
+        SDL_UnmapGPUTransferBuffer(device,read);
+    }
+    converter.release_device();for(auto* t:inputs) SDL_ReleaseGPUTexture(device,t);SDL_ReleaseGPUTransferBuffer(device,upload);SDL_ReleaseGPUTransferBuffer(device,read);
+    std::cout<<"Temporal resampling: fractional ratios, paired closest depth/motion, invalid sentinel, resize and alias rejection passed\n";
+}
 int main() try {
     require(SDL_Init(SDL_INIT_VIDEO),"SDL");
     auto* device=SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV|SDL_GPU_SHADERFORMAT_DXIL|SDL_GPU_SHADERFORMAT_MSL,true,nullptr);
     require(device,"device");
     check_temporal_textures(device);
     check_temporal_hud(device);
+    check_temporal_resample(device);
     starfox::render::GpuModel model;
     // Exact Q15 -identity gives the camera-space plane z = 400 + x/2.
     starfox::assets::Shape shape;

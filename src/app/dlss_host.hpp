@@ -28,6 +28,7 @@ class DlssHost {
     SDL_GPUDevice* evaluation_device_{};SDL_GPUTexture* output_{};
     uint32_t width_{},height_{},frame_index_{};uint64_t epoch_{},serial_{};
     bool configured_{};
+    uint32_t mode_{4},render_width_{},render_height_{};
     std::optional<starfox::render::TemporalProjection> previous_projection_;
     std::optional<starfox::render::TemporalCamera> previous_camera_;
     std::optional<std::int32_t> previous_ground_height_;
@@ -186,19 +187,26 @@ public:
         SDL_GPUCommandBuffer* command{};
         try {
             auto checked=[](bool ok,const char* error){if(!ok) throw std::runtime_error(error);};
+            uint32_t requested_mode=4;
+            if(const auto* value=std::getenv("STARFOX_TEST_DLSS_MODE")) {
+                const std::string_view name{value};
+                if(name=="QUALITY") requested_mode=1;else if(name=="BALANCED") requested_mode=2;
+                else if(name=="PERFORMANCE") requested_mode=3;else checked(name=="DLAA","Unknown DLSS mode");
+            }
             bool reset=serial_+1!=serial || epoch_!=epoch || !configured_ || !input.motion || !previous_camera_;
-            if(width_!=input.width || height_!=input.height || !configured_ || !output_) {
+            if(width_!=input.width || height_!=input.height || requested_mode!=mode_ || !configured_ || !output_) {
                 checked(SDL_WaitForGPUIdle(device),SDL_GetError());char error[512]{};
                 if(configured_) checked(!release_(sdk_,99,error,sizeof(error)),error);
                 configured_=false;
-                uint32_t w{},h{};checked(!configure_(sdk_,99,4,input.width,input.height,&w,&h,error,sizeof(error)),error);
-                configured_=true;checked(w==input.width && h==input.height,"Unexpected DLAA dimensions");
+                uint32_t w{},h{};checked(!configure_(sdk_,99,requested_mode,input.width,input.height,&w,&h,error,sizeof(error)),error);
+                configured_=true;checked(w && h && w<=input.width && h<=input.height,"Invalid DLSS render dimensions");
+                render_width_=w;render_height_=h;mode_=requested_mode;
                 if(output_) SDL_ReleaseGPUTexture(device,output_);output_=nullptr;
                 SDL_GPUTextureCreateInfo info{};info.type=SDL_GPU_TEXTURETYPE_2D;info.format=SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
                 info.usage=SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE|SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ|SDL_GPU_TEXTUREUSAGE_SAMPLER;
-                info.width=w;info.height=h;info.layer_count_or_depth=1;info.num_levels=1;
+                info.width=input.width;info.height=input.height;info.layer_count_or_depth=1;info.num_levels=1;
                 output_=SDL_CreateGPUTexture(device,&info);checked(output_,SDL_GetError());
-                width_=w;height_=h;evaluation_device_=device;reset=true;
+                width_=input.width;height_=input.height;evaluation_device_=device;reset=true;
             }
             command=SDL_AcquireGPUCommandBuffer(device);checked(command,SDL_GetError());
             constexpr float near_plane=.1f,far_plane=100000.f;
@@ -242,8 +250,14 @@ public:
             frame.near_plane=near_plane;frame.far_plane=far_plane;frame.vertical_fov=projection->vertical_fov;frame.aspect=projection->aspect;
             const auto textures=guides_.enqueue(device,command,input.geometry_depth,input.motion,input.width,input.height,near_plane,far_plane,reset,ground_plane?&ground:nullptr);
             checked(textures.depth,guides_.status().c_str());
+            auto evaluation_textures=textures;void* evaluation_color=input.rgba;
+            if(render_width_!=input.width || render_height_!=input.height) {
+                const auto reduced=guides_.resample(device,command,input.rgba,textures,render_width_,render_height_);
+                checked(reduced.color,guides_.status().c_str());evaluation_color=reduced.color;evaluation_textures=reduced.guides;
+            }
+            frame.width=render_width_;frame.height=render_height_;
             struct Callback {DlssHost* host;StarfoxDlssFrameV1* frame;char error[512]{};} callback{this,&frame};
-            void* resources[]{input.rgba,textures.depth,textures.motion,output_,textures.exposure};
+            void* resources[]{evaluation_color,evaluation_textures.depth,evaluation_textures.motion,output_,evaluation_textures.exposure};
             checked(bridge->dispatch(command,resources,5,3,[](void* user,void* list,void* const* textures,uint32_t count)->bool {
                 auto& c=*static_cast<Callback*>(user);if(count!=5) return false;
                 auto& f=*c.frame;f.command=list;f.color=textures[0];f.depth=textures[1];f.motion=textures[2];f.output=textures[3];f.exposure=textures[4];
@@ -267,7 +281,8 @@ public:
             serial_=serial;epoch_=epoch;previous_projection_=projection;previous_camera_=*camera;
             previous_pixel_projection_=ground.projection;
             previous_ground_height_=ground_plane?std::optional<std::int32_t>(ground_plane->world_height):std::nullopt;
-            std::cerr<<"dlss-gameplay: evaluated frame="<<frame.frame_index<<" reset="<<reset<<" size="<<input.width<<'x'<<input.height<<" diagnostic DLAA, incomplete world inputs\n";
+            std::cerr<<"dlss-gameplay: evaluated frame="<<frame.frame_index<<" reset="<<reset<<" size="<<input.width<<'x'<<input.height
+                <<" mode="<<mode_<<" render="<<render_width_<<'x'<<render_height_<<" diagnostic, incomplete world inputs\n";
             auto result=original;result.rgba=protected_output;return result;
         } catch(const std::exception& e) {
             if(command) SDL_CancelGPUCommandBuffer(command);serial_=0;

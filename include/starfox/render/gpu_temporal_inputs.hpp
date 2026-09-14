@@ -9,6 +9,7 @@ struct GpuTemporalTextures {
     void *device{}, *depth{}, *motion{}, *exposure{};
     std::uint32_t width{},height{};
 };
+struct GpuTemporalResampled {void* color{};GpuTemporalTextures guides;};
 struct TemporalGroundInputs {
     void* coverage{}; // uint per stored pixel: exactly 1 means visible terrain.
     bool packed_coverage{}; // instead read compositor's explicit terrain bit 27
@@ -26,6 +27,8 @@ struct TemporalGroundInputs {
 class GpuTemporalInputs {
 public:
     GpuTemporalInputs();~GpuTemporalInputs();
+    GpuTemporalResampled resample(void* device,void* command,void* color,
+        const GpuTemporalTextures&,std::uint32_t width,std::uint32_t height);
     GpuTemporalTextures enqueue(void* device,void* command,void* camera_depth,void* motion,
         std::uint32_t width,std::uint32_t height,float near_plane,float far_plane,bool reset,
         const TemporalGroundInputs* ground=nullptr);

@@ -1,5 +1,36 @@
 # PC DLSS work — September 13
 
+## Quality/Balanced/Performance gameplay connection (after 0.0.6.7)
+
+The diagnostic PC host now requests all three SDK super-resolution modes in
+addition to DLAA, uses the SDK's optimal input dimensions, and keeps final
+output/HUD at the original presentation size. Mode changes release/reconfigure
+the viewport and reset history. The checker accepts `-DlssMode` and verifies
+the requested mode was actually evaluated.
+
+A GPU-only preparation pass area-filters world color to the requested size,
+selects the nearest depth and its paired motion, scales motion to input-pixel
+units, and preserves invalid motion sentinels. Fractional/integer ratios,
+constant-color preservation, depth/motion pairing, resize/reuse and alias
+rejection pass on D3D12 and Vulkan. Generated DXIL/SPIR-V/MSL freshness passes.
+
+Important: this currently reduces an already-rendered full-resolution scene.
+It enables actual SDK SR evaluation but does NOT yet provide the main native
+low-resolution rendering performance benefit. Full-scene jitter, direct
+lower-resolution scene rendering, remaining world correspondence and normal
+menu/capability integration remain. Do not label this finished DLSS.
+
+`tmp/dlss-quality-gameplay` passes Original/EX, 16 frames each, initial reset
+only and exact queued/serialized output. Quality uses 533x299 -> 800x448.
+The Original screenshot was inspected with native HUD restored. These changes
+are after the 0.0.6.7 release tag and have not been published.
+
+`tmp/dlss-balanced-gameplay` and `tmp/dlss-performance-gameplay` each pass
+32 frames per Original/EX, initial reset only and identical queued/serialized
+final images, with clean SDK shutdown. Balanced uses 464x260 and Performance
+400x224 for 800x448 output. Existing 5120 guide and 366183 model-depth sample
+checks still pass alongside the new resampling fixtures on both GPU backends.
+
 ## Direct gameplay terrain-motion verification
 
 The opt-in terrain audit now also downloads the RG32 motion texture actually
