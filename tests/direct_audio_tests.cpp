@@ -2,6 +2,7 @@
 #include "starfox/audio/spc700_audio.hpp"
 #include "starfox/input/buttons.hpp"
 #include "starfox/simulation/game_simulation.hpp"
+#include "starfox/state/container.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -70,6 +71,37 @@ void check_good_luck_tail(const starfox::assets::RomImage& rom,
     require(cue >= 0 && heard_tail && finished, "Good luck tail regression did not exercise complete cue");
 }
 
+void check_audio_restore(starfox::audio::Spc700Audio& live) {
+    const auto saved = live.save_state();
+    starfox::audio::Spc700Audio restored;
+    restored.load_state(saved);
+    require(restored.save_state() == saved, "SPC fresh restore changed state");
+    for (int tick = 0; tick < 24; ++tick) {
+        const std::array writes{starfox::simulation::ApuPortWrite{3, 0x0d, 512}};
+        const auto commands = tick == 4
+            ? std::span<const starfox::simulation::ApuPortWrite>{writes}
+            : std::span<const starfox::simulation::ApuPortWrite>{};
+        const auto expected = live.render_logic_tick(commands);
+        const auto actual = restored.render_logic_tick(commands);
+        require(expected == actual, "SPC restored PCM differs");
+        require(live.save_state() == restored.save_state(), "SPC continuation state differs");
+        require(live.output_ports() == restored.output_ports(), "SPC restored ports differ");
+    }
+    live.load_state(saved);
+    require(live.save_state() == saved, "SPC same-device restore differs");
+    auto invalid = saved;
+    invalid.back() ^= 1U;
+    bool rejected = false;
+    try { live.load_state(invalid); } catch (const std::exception&) { rejected = true; }
+    require(rejected && live.save_state() == saved, "Corrupt SPC state changed audio");
+    const auto payload = starfox::state::unpack(saved, 0x53504301U, 0U);
+    const auto short_state = starfox::state::pack(0x53504301U, 0U,
+        payload.first(payload.size() / 2));
+    rejected = false;
+    try { live.load_state(short_state); } catch (const std::exception&) { rejected = true; }
+    require(rejected && live.save_state() == saved, "Truncated SPC state changed audio");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -79,6 +111,10 @@ int main(int argc, char** argv) {
     }
     const auto rom = starfox::assets::RomImage::load(argv[1]);
     const auto symbols = starfox::assets::SymbolMap::load(argv[2]);
+    {
+        starfox::audio::Spc700Audio fresh;
+        check_audio_restore(fresh);
+    }
     check_good_luck_tail(rom, symbols);
     auto effect = std::make_unique<starfox::simulation::GameSimulation>(
         rom, symbols, "LEVEL1_1", std::span<const std::uint8_t>{}, true);
@@ -94,6 +130,19 @@ int main(int argc, char** argv) {
     const auto control_boot_writes = control->map().take_apu_port_writes();
     require(!effect_boot_writes.empty() && !control_boot_writes.empty(),
         "direct-level startup omitted the base SPC bank");
+    {
+        starfox::audio::Spc700Audio partial, resumed;
+        const std::span boot{effect_boot_writes};
+        const auto split = boot.size() / 2;
+        (void)partial.render_logic_tick(boot.first(split));
+        require(!partial.driver_loaded(), "Partial upload fixture already finished");
+        resumed.load_state(partial.save_state());
+        const auto expected = partial.render_logic_tick(boot.subspan(split));
+        const auto actual = resumed.render_logic_tick(boot.subspan(split));
+        require(partial.driver_loaded() && resumed.driver_loaded(), "Restored upload failed");
+        require(expected == actual && partial.save_state() == resumed.save_state(),
+            "Restored partial SPC upload diverged");
+    }
     const auto effect_upload_frames =
         effect_audio.prime_upload_sequence(effect_boot_writes);
     const auto control_upload_frames =
@@ -102,6 +151,7 @@ int main(int argc, char** argv) {
     control->synchronize_apu_output_ports(control_audio.output_ports());
     require(effect_audio.driver_loaded() && control_audio.driver_loaded(),
         "base SPC bank did not initialize before direct-level entry");
+    check_audio_restore(effect_audio);
     // Constructor startup contains the boot sound0 bank. The first source
     // update requests the stage overlay after the desktop has synchronized
     // the live SPC ports, so this must be one completed frame here—not zero,
@@ -323,6 +373,10 @@ int main(int argc, char** argv) {
         starfox::simulation::ApuPortWrite{0U, 5U, 0U}};
     (void)effect_audio.render_logic_tick(boss);
     for (int tick = 0; tick < 20; ++tick) (void)effect_audio.render_logic_tick({});
+    require(std::any_of(effect_audio.last_music_samples().begin(),
+        effect_audio.last_music_samples().end(), [](auto sample) { return sample != 0; }),
+        "SPC audible restore fixture is silent");
+    check_audio_restore(effect_audio);
     constexpr std::array death{
         starfox::simulation::ApuPortWrite{0U, 0x11U, 0U}};
     (void)effect_audio.render_logic_tick(death);

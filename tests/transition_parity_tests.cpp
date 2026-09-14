@@ -181,4 +181,41 @@ int main(int argc, char** argv) {
     require(continue_game->flow_state()
             != starfox::simulation::GameFlowState::continue_choice,
         "Continue choice did not transition after completing its fade-out");
+
+    // FADERED edits PAL0PALETTE in place, while GAMEPALBUFF retains the
+    // selected model palette. Background reloads do not necessarily write
+    // palette seven (notably EX's bottom-route meteor checkpoint, issue #43).
+    for(const auto* stage:{"LEVEL1_1","LEVEL3_2"}) {
+        auto revival=std::make_unique<starfox::simulation::GameSimulation>(rom,symbols,stage);
+        // Loading EX assets alone does not select EX simulation behavior.
+        // Exercise the reported experience, not Original mode on an EX ROM.
+        revival->set_experience(starfox_ex
+            ? starfox::simulation::Experience::starfox_ex
+            : starfox::simulation::Experience::original);
+        const auto restart=symbols.find("MAPRESTART").front();
+        for(unsigned tick=0;tick<3000 && !revival->map().read_native_word(restart);++tick)
+            source_tick(*revival);
+        require(revival->map().read_native_word(restart)!=0,"palette revival fixture needs a checkpoint");
+        const auto paletteAddress=symbols.find("PAL0PALETTE").front()+7*32;
+        // Repeated checkpoint reloads must not use an already tinted palette
+        // as their new baseline (the reporter saw it persist across deaths).
+        for(unsigned restart_attempt=0;restart_attempt<3;++restart_attempt) {
+        std::array<std::uint16_t,16> red;red.fill(0x001f);
+        for(unsigned i=0;i<16;++i) revival->map().write_native_word(paletteAddress+i*2,red[i]);
+        revival->map().write_cgram(112,red);
+        const auto flags=symbols.find("BGFLAGS").front();
+        revival->map().write_native_byte(flags,revival->map().read_native_byte(flags)|1U);
+        source_tick(*revival);
+        const auto selected=revival->palette_words();
+        require(std::any_of(selected.begin(),selected.end(),[](auto colour){return (colour&0x7fe0)!=0;}),
+            "revival palette fixture has no non-red selected colours");
+        for(unsigned i=0;i<16;++i) {
+            if(revival->map().read_native_word(paletteAddress+i*2)!=selected[i]
+                || revival->map().ppu_state().cgram[112+i]!=selected[i]) {
+                std::cerr<<"Retained death colour: "<<stage<<" restart "<<restart_attempt<<" palette index "<<i<<'\n';
+                require(false,"restart must restore the selected model palette, not the death tint");
+            }
+        }
+        }
+    }
 }

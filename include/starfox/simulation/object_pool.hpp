@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace starfox::simulation {
@@ -19,6 +20,7 @@ enum class ObjectMemoryLayout : std::uint8_t {
 // Semantic form of the original al_/alx_ blocks. Narrow fields intentionally
 // retain the 65816 wrapping behavior expected by strategy code.
 struct GameObject {
+    [[nodiscard]] bool operator==(const GameObject&) const = default;
     std::uint16_t shape{};
     ObjectHandle attached{};
     std::uint8_t flags{};
@@ -71,6 +73,9 @@ public:
         ObjectMemoryLayout layout = ObjectMemoryLayout::original);
 
     void reset() noexcept;
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    // Decode and validate a temporary pool before changing this instance.
+    void load_state(std::span<const std::uint8_t> bytes);
     [[nodiscard]] ObjectHandle allocate_after(ObjectHandle previous = 0) noexcept;
     [[nodiscard]] bool remove(ObjectHandle handle) noexcept;
     [[nodiscard]] bool is_active(ObjectHandle handle) const noexcept;

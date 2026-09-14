@@ -73,6 +73,7 @@ ShapeDecoder::ShapeDecoder(const RomImage& rom, const SymbolMap& symbols)
     has_lod_pointers_ = symbols.find("PLANETSEQ2_L").empty();
     if (const auto colour_table = find_rom("ID_0_C"); colour_table != 0U) {
         colour_table_bank_ = static_cast<std::uint8_t>(colour_table >> 16U);
+        default_colour_pointer_ = static_cast<std::uint16_t>(colour_table);
     }
     has_diffuse_shade_tables_ = true;
     for (std::size_t depth = 0; depth < diffuse_shade_tables_.size(); ++depth) {
@@ -164,7 +165,7 @@ ShapeHeader ShapeDecoder::decode_header(std::uint32_t address) const {
         header.y_max = 0;
         header.z_max = 0;
         header.size = 0;
-        header.colour_pointer = 0x8213; // ID_0_C fallback for standalone previews
+        header.colour_pointer = default_colour_pointer_; // relocated ID_0_C for standalone previews
         const auto self = static_cast<std::uint16_t>(address & 0xffffU);
         header.shadow_pointer = self;
         header.lod1_pointer = self;
@@ -213,7 +214,12 @@ Shape ShapeDecoder::decode_lod(
     if (address == parent.address) {
         return decode(address, {}, colour_pointer_override);
     }
-    auto shape = decode(address);
+    // Resolve the inherited material before decoding. Compact headers do not
+    // own a colour table; parsing an unrelated fallback first can fail even
+    // when the parent/override table is valid.
+    const auto colour_pointer = colour_pointer_override != 0U
+        ? colour_pointer_override : parent.colour_pointer;
+    auto shape = decode(address, {}, colour_pointer);
     if (shape.header.compact) {
         // Compact headers contain only points, bank and faces.
         shape.header.sort_z = parent.sort_z;
@@ -226,12 +232,7 @@ Shape ShapeDecoder::decode_lod(
     // MDRAWLIS reads colour and shift from the base header before selecting
     // either a compact or a full points/faces header for the chosen LOD.
     shape.header.shift = parent.shift;
-    shape.header.colour_pointer = colour_pointer_override != 0U
-        ? colour_pointer_override : parent.colour_pointer;
-    shape.colour_words.clear();
-    shape.colour_materials.clear();
-    shape.textures.clear();
-    decode_colours(shape);
+    shape.header.colour_pointer = colour_pointer;
     return shape;
 }
 
@@ -444,7 +445,9 @@ void ShapeDecoder::decode_faces(Shape& shape) const {
                 const auto face_address = static_cast<std::uint32_t>(
                     static_cast<std::int64_t>(face_relative_address) + 1 + face_relative);
                 const auto alternate_offset_address = address + 4U;
-                const auto alternate_offset = signed8(rom_.read8(alternate_offset_address));
+                // MSH_BSP uses GETB + LOB: the relative branch is an unsigned
+                // byte. Sign extension jumps backwards for large EX BSP trees.
+                const auto alternate_offset = rom_.read8(alternate_offset_address);
                 const auto fallthrough = address + 5U;
                 const auto alternate = alternate_offset == 0
                     ? 0U
@@ -469,6 +472,9 @@ void ShapeDecoder::decode_faces(Shape& shape) const {
                 return;
             }
             if (opcode == kBspEnd || opcode == kEndShape || opcode == kQuit) {
+                // Preserve an explicit empty terminal for consumers which
+                // validate graph edges instead of treating unknown nodes as exits.
+                shape.bsp_leaves.push_back({address, 0U});
                 return;
             }
             throw std::runtime_error{"invalid BSP control opcode " + std::to_string(opcode)};

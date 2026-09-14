@@ -38,6 +38,7 @@ private:
 };
 
 class MapVm {
+    friend class GameSimulation;
 public:
     using ConditionHandler = std::function<bool(MapVm&)>;
     MapVm(
@@ -47,6 +48,9 @@ public:
         const assets::SymbolMap* symbols = nullptr);
 
     void start(std::uint32_t address, ObjectHandle player);
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    // ObjectPool is restored separately by the enclosing game transaction.
+    void load_state(std::span<const std::uint8_t> bytes);
     void set_player(ObjectHandle player);
     [[nodiscard]] bool is_native_object_active(std::uint16_t pointer) const noexcept {
         return objects_->is_active(native_object_handle(pointer));
@@ -80,6 +84,7 @@ public:
     [[nodiscard]] const std::vector<std::uint8_t>& messages() const noexcept { return messages_; }
     void clear_messages() noexcept { messages_.clear(); }
     void tick_video_phase();
+    void refresh_background_metadata();
     void complete_background_request();
     // Import WORLD.ASM interpreter registers after an original routine such
     // as RESTART_L has advanced the native map directly.
@@ -87,6 +92,12 @@ public:
     void write_native_byte(std::uint32_t address, std::uint8_t value);
     [[nodiscard]] std::uint8_t read_native_byte(std::uint32_t address) const noexcept;
     [[nodiscard]] std::uint16_t read_native_word(std::uint32_t address) const noexcept;
+    [[nodiscard]] std::optional<std::uint8_t> peek_ram_byte(std::uint32_t address) const noexcept {
+        return cpu_.peek_ram8(address);
+    }
+    [[nodiscard]] std::optional<std::uint16_t> peek_ram_word(std::uint32_t address) const noexcept {
+        return cpu_.peek_ram16(address);
+    }
     void write_native_word(std::uint32_t address, std::uint16_t value);
     [[nodiscard]] bool load_cartridge_ram(
         std::span<const std::uint8_t> bytes) noexcept {
@@ -142,6 +153,9 @@ public:
     }
     [[nodiscard]] std::optional<std::array<std::int16_t, 2>>
         background_scroll_override() const;
+    // Presentation capture must not perform emulated bus reads.
+    [[nodiscard]] std::optional<std::array<std::int16_t, 2>>
+        peek_background_scroll_override() const noexcept;
     void draw_planet_sphere(std::uint16_t sprite) {
         cpu_.draw_planet_sphere(sprite);
     }
@@ -203,6 +217,7 @@ public:
 
 private:
     void execute_ready_records();
+    template<class Archive,class Self> static void transfer_state(Archive& archive,Self& self);
     void spawn_table_object(std::uint8_t opcode);
     void spawn_direct_object();
     [[nodiscard]] ObjectHandle allocate_map_object();
@@ -228,6 +243,7 @@ private:
 
     const assets::RomImage* rom_{};
     MapDatabase database_;
+    const assets::SymbolMap* state_symbols_{};
     ObjectPool* objects_{};
     ObjectHandle player_{};
     ObjectHandle last_spawned_{};

@@ -123,7 +123,7 @@ constexpr std::string_view kPregameTag{"SFE_PREGAME_V"};
 // no TWO_D_FILTER key, so the missing-key check would fail the whole load and
 // silently reset every setting. Take the next number and default TWO_D_FILTER
 // for anything older.
-constexpr int kPregameRevision = 12;
+constexpr int kPregameRevision = 13;
 
 std::filesystem::path portable_directory;
 
@@ -136,6 +136,20 @@ std::filesystem::path desktop_data_directory() {
     if (base == nullptr || *base == '\0') throw std::runtime_error{"Cannot locate portable data directory"};
     return std::filesystem::path{base};
 #endif
+}
+
+bool steam_input_device(SDL_JoystickID identifier) {
+    const auto* name=SDL_GetGamepadNameForID(identifier);
+    return (SDL_GetGamepadVendorForID(identifier)==0x28deU
+            && SDL_GetGamepadProductForID(identifier)==0x11ffU)
+        || (name && contains(name,"steam virtual"));
+}
+
+bool native_deck_device(SDL_JoystickID identifier) {
+    const auto* name=SDL_GetGamepadNameForID(identifier);
+    return (SDL_GetGamepadVendorForID(identifier)==0x28deU
+            && SDL_GetGamepadProductForID(identifier)==0x1205U)
+        || (name && contains(name,"steam deck"));
 }
 
 std::filesystem::path legacy_bindings_path() {
@@ -327,8 +341,10 @@ void configure_native_gamepad_support() noexcept {
     // translating it into a virtual Xbox-layout device.
     static_cast<void>(SDL_SetHintWithPriority(
         SDL_HINT_XINPUT_ENABLED, "1", SDL_HINT_DEFAULT));
-    static_cast<void>(SDL_SetHintWithPriority(
-        SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, "1", SDL_HINT_DEFAULT));
+    // Do not install a per-device Deck override: SDL already enables that
+    // driver through its global HIDAPI default. A specific "1" here bypasses
+    // a launcher's global SDL_JOYSTICK_HIDAPI=0 and can reopen the physical
+    // controller while Steam Input owns it (the driver clears HID mappings).
     static_cast<void>(SDL_SetHintWithPriority(
         SDL_HINT_JOYSTICK_RAWINPUT_CORRELATE_XINPUT,
         "1", SDL_HINT_DEFAULT));
@@ -351,7 +367,17 @@ std::vector<SDL_Gamepad*> open_player_gamepads(std::size_t maximum) noexcept {
     std::vector<SDL_JoystickID> ordered{
         identifiers, identifiers + static_cast<std::size_t>(count)};
     SDL_free(identifiers);
-    std::stable_sort(ordered.begin(), ordered.end(), [](auto left, auto right) {
+    if(std::any_of(ordered.begin(),ordered.end(),steam_input_device)) {
+        // The builtin controller must not become an extra EX player alongside
+        // Steam's translated stream, or receive duplicate game/rumble input.
+        std::erase_if(ordered,native_deck_device);
+    }
+    std::stable_sort(ordered.begin(), ordered.end(), [maximum](auto left, auto right) {
+        // Steam owns the player's layout and system-button chords. If it
+        // exposes a virtual controller, do not accidentally choose a raw Deck
+        // device enumerated first. Explicit multiplayer ordering stays intact.
+        if(maximum==1U && steam_input_device(left)!=steam_input_device(right))
+            return steam_input_device(left);
         const auto left_player = SDL_GetGamepadPlayerIndexForID(left);
         const auto right_player = SDL_GetGamepadPlayerIndexForID(right);
         if (left_player >= 0 || right_player >= 0) {
@@ -713,7 +739,7 @@ bool load_pregame_settings(
             found[10] = value >= 0 && value <= (revision < 11 ? 1 : 3);
         } else if (name == "TWO_D_FILTER") {
             loaded.two_d_filter = static_cast<std::uint8_t>(value);
-            found[20] = value >= 0 && value <= 4;
+            found[20] = value >= 0 && value <= 5;
         } else if (name == "EFFECTS") {
             if (value < 0 || value >= render::effect_count) return false;
             loaded.effect = static_cast<std::uint8_t>(value);
@@ -727,9 +753,25 @@ bool load_pregame_settings(
         } else if (name == "WIREFRAME_THICKNESS") {
             if (value < 1 || value > 4) return false;
             loaded.wireframe_thickness = 1U; // Consume legacy setting, do not apply it.
+        } else if (name == "INFINITE_BOMBS" || name == "INFINITE_BOOST" || name == "INFINITE_LIVES") {
+            if (value < 0 || value > 1) return false;
+            (name == "INFINITE_BOMBS" ? loaded.infinite_bombs : name == "INFINITE_LIVES" ? loaded.infinite_lives : loaded.infinite_boost) = value != 0;
+        } else if (name == "DEFAULT_LASER") {
+            if (value < 0 || value > 2) return false;
+            loaded.default_laser = static_cast<std::uint8_t>(value);
+        } else if (name == "STEREO_OUTPUT") {
+            if (value < 0 || value > 2) return false;
+            loaded.stereo_output = static_cast<std::uint8_t>(value);
+        } else if (name == "SELECTED_LEVEL") {
+            if (value != 0 && (value < 11 || value > 79 || value % 10 == 0)) return false;
+            loaded.selected_level = static_cast<std::uint8_t>(value);
+        } else if (name == "RAY_TRACING") {
+            if (value < 0 || value > 1) return false;
+            loaded.ray_tracing = value != 0;
         } else if (name == "ENHANCED_SHADOWS") {
             if (value < 0 || value > 1) return false;
-            loaded.enhanced_shadows = value != 0;
+            // Accept old files without silently enabling hardware ray tracing.
+            loaded.enhanced_shadows = false;
         } else if (name == "CHROMATIC_ABERRATION") {
             if (value < 0 || value > 3) return false;
             loaded.chromatic_aberration = static_cast<std::uint8_t>(value);
@@ -737,7 +779,7 @@ bool load_pregame_settings(
             if (value < 0 || value > 3) return false;
             loaded.hdr_effect = static_cast<std::uint8_t>(value);
         } else if (name == "LANGUAGE") {
-            if (value < 0 || value > 4) return false;
+            if (value < 0 || value > 5) return false;
             loaded.language = static_cast<std::uint8_t>(value);
         } else if (name == "MODEL_SMOOTHING") {
             if (value < 0 || value > 3) return false;
@@ -813,13 +855,17 @@ bool save_pregame_settings(
     if (path.empty() || settings.timing_mode > 1U
         || settings.display_mode > 4U || settings.crosshair_colour > 7U
         || settings.anti_aliasing > 3U || settings.rtx_lighting > 3U
-        || settings.two_d_filter > 4U || settings.effect >= render::effect_count
+        || settings.two_d_filter > 5U || settings.effect >= render::effect_count
         || settings.effect_intensity > 100U || settings.renderer_mode > 1U
         || settings.world_effect >= render::effect_count || settings.world_effect_intensity > 100U || settings.bloom > 3U || settings.bloom_2d > 3U
         || settings.wireframe_thickness < 1U || settings.wireframe_thickness > 4U
         || settings.chromatic_aberration > 3U
         || settings.hdr_effect > 3U
-        || settings.language > 4U || settings.experience > 1U || settings.music_volume > 100U
+        || settings.default_laser > 2U
+        || settings.stereo_output > 2U
+        || (settings.selected_level != 0U && (settings.selected_level < 11U
+            || settings.selected_level > 79U || settings.selected_level % 10U == 0U))
+        || settings.language > 5U || settings.experience > 1U || settings.music_volume > 100U
         || settings.sfx_volume > 100U || settings.render_scale > 3U || settings.model_smoothing > 3U) {
         return false;
     }
@@ -857,9 +903,15 @@ bool save_pregame_settings(
            << "BLOOM_2D " << static_cast<unsigned>(settings.bloom_2d) << '\n'
            << "MODEL_SMOOTHING " << static_cast<unsigned>(settings.model_smoothing) << '\n'
            << "LANGUAGE " << static_cast<unsigned>(settings.language) << '\n'
-           << "ENHANCED_SHADOWS " << static_cast<unsigned>(settings.enhanced_shadows) << '\n'
            << "CHROMATIC_ABERRATION " << static_cast<unsigned>(settings.chromatic_aberration) << '\n'
            << "HDR_EFFECT " << static_cast<unsigned>(settings.hdr_effect) << '\n'
+           << "RAY_TRACING " << static_cast<unsigned>(settings.ray_tracing) << '\n'
+           << "INFINITE_BOMBS " << static_cast<unsigned>(settings.infinite_bombs) << '\n'
+           << "INFINITE_LIVES " << static_cast<unsigned>(settings.infinite_lives) << '\n'
+           << "INFINITE_BOOST " << static_cast<unsigned>(settings.infinite_boost) << '\n'
+           << "DEFAULT_LASER " << static_cast<unsigned>(settings.default_laser) << '\n'
+           << "SELECTED_LEVEL " << static_cast<unsigned>(settings.selected_level) << '\n'
+           << "STEREO_OUTPUT " << static_cast<unsigned>(settings.stereo_output) << '\n'
            << "VSYNC " << static_cast<unsigned>(settings.vsync) << '\n'
            << "RENDERER_MODE "
            << static_cast<unsigned>(settings.renderer_mode) << '\n'

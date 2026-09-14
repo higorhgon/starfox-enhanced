@@ -16,3 +16,6 @@ dependencyResolutionManagement {
 
 rootProject.name = 'StarFoxEnhanced'
 include ':app'
+// Opt-in standalone Quest APK; the ordinary Android app is unchanged.
+include ':quest'
+project(':quest').projectDir = file('../quest')

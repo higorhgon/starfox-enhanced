@@ -6,12 +6,17 @@
 
 #include <cstdint>
 #include <optional>
+#include <array>
 
 namespace starfox::simulation {
 struct MeterState;
 }
 
 namespace starfox::render {
+struct MeterRectangle {std::int32_t x,y,width,height;std::uint8_t colour;};
+struct MeterRectangles {std::array<MeterRectangle,64> rectangles{};std::size_t count{};};
+[[nodiscard]] MeterRectangles meter_rectangles(const simulation::MeterState&,
+    std::uint32_t viewport_width,bool anchor_to_edges=false,const HudLayout* layout=nullptr) noexcept;
 
 // The cartridge rebuilds the four-piece reticle only on its 20 Hz logic
 // update. Keep the source OAM itself authoritative, but move that rigid group
@@ -28,6 +33,8 @@ void suppress_crosshair_oam(simulation::SnesPpuState& ppu) noexcept;
 
 class SpriteRenderer {
 public:
+    // Retail MSHOWPERCGRAPH: 104x12 frame, 100x8 maximum fill.
+    void draw_completion_bar(std::uint8_t percentage, Framebuffer& target) const noexcept;
     void draw_objects(
         const simulation::SnesPpuState& ppu,
         Framebuffer& target,

@@ -4,13 +4,26 @@
 #include "starfox/simulation/snes_ppu.hpp"
 
 #include <cstdint>
+#include <span>
 
 namespace starfox::render {
+
+// Center-height left wall, including source HDMA scroll. Transparent wall
+// texels fall back to the darkest palette entry, never the backdrop color.
+[[nodiscard]] std::uint8_t tunnel_wall_index(
+    const simulation::SnesPpuState& ppu) noexcept;
 
 enum class TilePriorityPass {
     all,
     low,
     high,
+};
+
+// Authored non-repeating artwork embedded in an otherwise repeating tilemap.
+// Only matching indexed pixels outside the native window are replaced.
+struct BackgroundUniqueRegion {
+    std::int32_t left, top, right, bottom;
+    std::uint8_t first_colour, last_colour, replacement_colour;
 };
 
 class BackgroundRenderer {
@@ -33,7 +46,8 @@ public:
         bool extend_horizontal = true,
         bool wrap_horizontal = true,
         bool transparent_cgram_black = false,
-        std::uint32_t single_occurrence_top_rows = 0U) const noexcept;
+        std::uint32_t single_occurrence_top_rows = 0U,
+        std::span<const BackgroundUniqueRegion> unique_regions = {}) const noexcept;
     void draw_bg3(
         const simulation::SnesPpuState& ppu,
         Framebuffer& target,

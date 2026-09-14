@@ -1,6 +1,9 @@
 #include "starfox/simulation/wdc65816.hpp"
 
 #include "starfox/assets/decrunch.hpp"
+#include "starfox/assets/bps.hpp"
+#include "starfox/state/archive.hpp"
+#include "starfox/state/container.hpp"
 
 #include "cpu/65816/cpu_65c816.h"
 
@@ -17,6 +20,10 @@
 #include <vector>
 
 namespace starfox::simulation {
+template<class Archive, class T> requires std::same_as<std::remove_const_t<T>, ApuPortWrite>
+void serialize(Archive& archive, T& write) { archive(write.port,write.value,write.clock_offset); }
+template<class Archive, class T> requires std::same_as<std::remove_const_t<T>, MsuRegisterWrite>
+void serialize(Archive& archive, T& write) { archive(write.address,write.value,write.clock_offset); }
 namespace {
 
 constexpr std::uint32_t kAddressSpaceSize = 1U << 24U;
@@ -81,6 +88,7 @@ std::uint32_t find_rom_symbol_or_aliases(const assets::SymbolMap* symbols,
 
 struct Wdc65816::Impl {
     const assets::RomImage* rom{};
+    const assets::SymbolMap* state_symbols{};
     SystemBus bus{};
     std::vector<Page> pages{static_cast<std::size_t>(kPageCount)};
     std::uint32_t rom_bank_count{};
@@ -215,6 +223,10 @@ struct Wdc65816::Impl {
     std::uint32_t mzigzag{};
     std::uint32_t bg_scrollbuffer{};
     std::uint32_t tunnel_flag{};
+    std::uint32_t background3_scroll_flag{};
+    std::uint32_t background3_scroll{};
+    std::uint32_t background_horizontal_mode{};
+    std::uint8_t background_rotate_mode{};
     std::uint32_t tunnel_previous_z{};
     std::uint32_t tunnel_scroll_override{};
     std::uint32_t tunnel_hdma_enable{};
@@ -273,6 +285,61 @@ struct Wdc65816::Impl {
     std::uint32_t task_entry{};
     std::uint32_t task_return_sentinel{};
     WDC65C816 cpu{&bus};
+
+    template<class Archive> void transfer_state(Archive& archive) {
+        // Symbol addresses, compatible ROM banks, bus pages and callbacks are
+        // reconstructed by Impl's constructor, never loaded from disk.
+        archive.fixed(std::span{wram});
+        archive.fixed(std::span{superfx_ram});
+        archive(cartridge_ram,controller,apu_ports,apu_output_connected,
+            apu_upload_active,apu_upload_clear_sequence,superfx_registers,
+            ppu_registers,dma_registers,vram_address,cgram_address,cgram_high_byte,
+            background_scroll_low,background_scroll_high_byte,oam_address,oam_high_byte,
+            vertical_counter_high_byte,horizontal_counter_high_byte,wram_port_address,
+            multiply_a,divide_dividend,divide_quotient,multiply_result,
+            apu_writes,msu_writes,msu_registers,apu_upload_generation,
+            unknown_superfx_launches,apu_clock_offset,task_active,task_entry,
+            task_return_sentinel,bus.open_bus);
+        archive(ppu.vram,ppu.cgram,ppu.oam,ppu.background_mode,ppu.bg3_high_priority,
+            ppu.bg1_tile_size_16,ppu.bg2_tile_size_16,ppu.bg3_tile_size_16,ppu.bg4_tile_size_16,
+            ppu.mosaic,ppu.object_select,ppu.bg1_character_base,ppu.bg1_screen_base,
+            ppu.bg1_screen_size,ppu.bg1_scroll_x,ppu.bg1_scroll_y,
+            ppu.bg2_character_base,ppu.bg2_screen_base,ppu.bg2_screen_size,
+            ppu.bg2_scroll_x,ppu.bg2_scroll_y,ppu.bg3_screen_base,ppu.bg3_screen_size,
+            ppu.bg3_character_base,ppu.bg3_scroll_x,ppu.bg3_scroll_y,ppu.main_screen,
+            ppu.bg2_vertical_offsets_enabled,ppu.bg2_horizontal_offsets,
+            ppu.bg2_horizontal_offsets_enabled,ppu.bg2_scanline_scroll_y,
+            ppu.bg2_scanline_scroll_enabled,ppu.tunnel_scene);
+        archive(native_model_draw.active,native_model_draw.shape,native_model_draw.x,
+            native_model_draw.y,native_model_draw.z,native_model_draw.rotation_x,
+            native_model_draw.rotation_y,native_model_draw.rotation_z,
+            native_model_draw.vanish_x,native_model_draw.vanish_y,
+            native_model_draw.animation_frame,native_model_draw.colour_frame,native_model_draw.colour_table);
+        archive(cpu.mode_native_6502,cpu.mode_emulation,cpu.mode_long_a,cpu.mode_long_xy);
+        if constexpr (std::same_as<Archive,state::Reader>) {
+            if (cpu.mode_native_6502 || (cpu.mode_emulation && (cpu.mode_long_a || cpu.mode_long_xy)))
+                throw std::runtime_error{"invalid saved CPU mode"};
+            cpu.OnUpdateMode(); // Rebuild process-local instruction dispatch.
+        }
+        auto& core=cpu.cpu_state;
+        auto interrupts=core.pending_interrupts.load(std::memory_order_relaxed);
+        archive(core.regs.a.u16,core.regs.x.u16,core.regs.y.u16,core.regs.d.u16,core.regs.sp.u16,
+            core.cycle,core.cycle_stop,core.event_cycle,core.code_segment_base,
+            core.data_segment_base,core.ip,core.zero,core.negative,core.interrupts,
+            interrupts,core.carry,core.other_flags,cpu.num_emulated_instructions);
+        if constexpr (std::same_as<Archive,state::Reader>) {
+            if ((core.code_segment_base & 0xff00ffffU)!=0U
+                || (core.data_segment_base & 0xff00ffffU)!=0U
+                || wram_port_address>=0x20000U || task_entry>=kAddressSpaceSize
+                || task_return_sentinel>=kAddressSpaceSize)
+                throw std::runtime_error{"invalid saved CPU address"};
+            for (const auto& write:apu_writes) if(write.port>3U)
+                throw std::runtime_error{"invalid saved APU port"};
+            for (const auto& write:msu_writes) if(write.address<0x2000U || write.address>0x2007U)
+                throw std::runtime_error{"invalid saved MSU register"};
+            core.pending_interrupts.store(interrupts,std::memory_order_relaxed);
+        }
+    }
 
     bool service_zero_projection(std::uint32_t pc) {
         if (projection_zero_loop == 0U || projection_return == 0U
@@ -475,6 +542,7 @@ struct Wdc65816::Impl {
 
     explicit Impl(const assets::RomImage& rom_image, const assets::SymbolMap* symbols)
         : rom(&rom_image),
+          state_symbols(symbols),
           mdecrunch(find_rom_symbol(symbols, "MDECRUNCH")),
           mdecclear(find_rom_symbol(symbols, "MDECCLEAR")),
           m_enddata(find_symbol(symbols, "M_ENDDATA")),
@@ -643,6 +711,10 @@ struct Wdc65816::Impl {
           projection_vanish_x(static_cast<std::uint16_t>(
               find_symbol(symbols, "VANISHX"))) {
         tunnel_flag = find_symbol(symbols, "INATUNNEL");
+        background3_scroll_flag = find_symbol(symbols, "BG3SCROLLFLAG");
+        background3_scroll = find_symbol(symbols, "BG3SCROLL");
+        background_horizontal_mode = find_symbol(symbols, "HPOSJMP");
+        background_rotate_mode = static_cast<std::uint8_t>(find_symbol(symbols, "ROTATE_HOF"));
         tunnel_previous_z = find_symbol(symbols, "OLDVIEWPOSZ");
         tunnel_scroll_override = find_symbol(symbols, "BG2VOFSOVERRIDE");
         tunnel_hdma_enable = find_symbol(symbols, "HDMAEN_GC");
@@ -757,6 +829,9 @@ struct Wdc65816::Impl {
         write8(kBootstrap + 0U, 0x18U); // CLC
         write8(kBootstrap + 1U, 0xfbU); // XCE
         cpu.PowerOn();
+        // The adapter uses SingleStep without an external event queue. The
+        // upstream core otherwise leaves this unused scheduling field unset.
+        cpu.cpu_state.event_cycle = 0U;
         cpu.SetRegister("pc", kBootstrap);
         cpu.SingleStep();
         cpu.SingleStep();
@@ -782,7 +857,37 @@ struct Wdc65816::Impl {
     }
 
     void tick_background_video_phase() {
-        ppu.tunnel_scene = tunnel_flag != 0U && read8(tunnel_flag) != 0U
+        // IRQ.ASM/SETBG2VOFS publishes the requested words when the source
+        // overrides tunnel scrolling (notably Game Over and credits). Merely
+        // disabling the per-scanline table leaves the previous scene's scroll.
+        // These request variables are shared with the ending scroll helper.
+        if(wram[0]<=14U && tunnel_scroll_override
+            && read8(tunnel_scroll_override)!=0U
+            && ending_scroll_requested[2] && ending_scroll_requested[3]) {
+            const auto x=ending_scroll_requested[2],y=ending_scroll_requested[3];
+            write_ppu(0x2110U,read8(y));
+            write_ppu(0x2110U,read8(y+1U));
+            write_ppu(0x210fU,read8(x));
+            write_ppu(0x210fU,read8(x+1U));
+        }
+        // FOXIRQ3 copies the value captured by TRANSFER_L, not a camera
+        // position that subsequent strategies may already have changed.
+        if(wram[0]<=14U && background3_scroll_flag && background3_scroll
+            && read8(background3_scroll_flag)!=0U) {
+            write_ppu(0x2111U,read8(background3_scroll));
+            write_ppu(0x2111U,read8(background3_scroll+1U));
+        }
+        refresh_background_metadata([this](std::uint32_t address) { return read8(address); });
+    }
+
+    template<class Read>
+    void refresh_background_metadata(Read read8) {
+        // INATUNNEL also marks Macbeth's underground terrain. Its ROTATE_HOF
+        // landscape remains expandable; tunnel/nograd cross-sections do not.
+        // Water uses mode 2 and likewise must not inherit solid tunnel margins.
+        ppu.tunnel_scene = tunnel_flag != 0U && read8(tunnel_flag) == 1U
+            && !(background_horizontal_mode != 0U
+                && read8(background_horizontal_mode) == background_rotate_mode)
             && (ppu.background_mode == 1U || ppu.background_mode == 2U);
         ppu.bg2_scanline_scroll_enabled = tunnel_flag != 0U
             && (ppu.background_mode == 1U || ppu.background_mode == 2U)
@@ -2600,6 +2705,21 @@ Wdc65816::~Wdc65816() = default;
 Wdc65816::Wdc65816(Wdc65816&&) noexcept = default;
 Wdc65816& Wdc65816::operator=(Wdc65816&&) noexcept = default;
 
+std::vector<std::uint8_t> Wdc65816::save_state() const {
+    state::Writer archive;
+    impl_->transfer_state(archive);
+    return state::pack(0x43505501U,assets::crc32(impl_->rom->bytes()),archive.bytes());
+}
+
+void Wdc65816::load_state(std::span<const std::uint8_t> bytes) {
+    const auto payload=state::unpack(bytes,0x43505501U,assets::crc32(impl_->rom->bytes()));
+    auto restored=std::make_unique<Impl>(*impl_->rom,impl_->state_symbols);
+    state::Reader archive{payload};
+    restored->transfer_state(archive);
+    archive.finish();
+    impl_.swap(restored);
+}
+
 std::uint8_t Wdc65816::read8(std::uint32_t address) const {
     return impl_->read8(address);
 }
@@ -2607,6 +2727,25 @@ std::uint8_t Wdc65816::read8(std::uint32_t address) const {
 std::uint16_t Wdc65816::read16(std::uint32_t address) const {
     return static_cast<std::uint16_t>(read8(address))
         | (static_cast<std::uint16_t>(read8(address + 1U)) << 8U);
+}
+
+std::optional<std::uint8_t> Wdc65816::peek_ram8(std::uint32_t address) const noexcept {
+    if(address>=0x7e0000U && address<0x800000U) return impl_->wram[address-0x7e0000U];
+    const auto bank=address>>16U,offset=address&0xffffU;
+    if((bank<0x40U || (bank>=0x80U && bank<0xc0U)) && offset<0x2000U)
+        return impl_->wram[offset];
+    if(address>=kSuperFxRamBase && address<kSuperFxRamBase+kSuperFxRamSize)
+        return impl_->superfx_ram[address-kSuperFxRamBase];
+    if(address>=kCartridgeRamBase && address-kCartridgeRamBase<impl_->cartridge_ram.size())
+        return impl_->cartridge_ram[address-kCartridgeRamBase];
+    return std::nullopt;
+}
+
+std::optional<std::uint16_t> Wdc65816::peek_ram16(std::uint32_t address) const noexcept {
+    if(address>=0xffffffU) return std::nullopt;
+    const auto low=peek_ram8(address),high=peek_ram8(address+1U);
+    if(!low || !high) return std::nullopt;
+    return static_cast<uint16_t>(*low | (static_cast<uint16_t>(*high)<<8U));
 }
 
 void Wdc65816::write8(std::uint32_t address, std::uint8_t value) {
@@ -2736,6 +2875,18 @@ void Wdc65816::tick_ending_video_phase() {
 
 void Wdc65816::tick_background_video_phase() {
     impl_->tick_background_video_phase();
+}
+
+void Wdc65816::refresh_background_metadata() {
+    // Presentation-only reads from mapped RAM/ROM: never touch I/O, open bus,
+    // scroll latches, CPU registers, or the source's raster scheduling.
+    impl_->refresh_background_metadata([this](std::uint32_t address) {
+        address &= 0xffffffU;
+        const auto& page = impl_->pages[address >> kPageBits];
+        if (!page.ptr || (address & page.io_mask) == page.io_eq)
+            throw std::runtime_error("Background metadata referenced unmapped memory or I/O");
+        return page.ptr[address & (kPageSize - 1U)];
+    });
 }
 
 void Wdc65816::set_bg2_scroll(std::int16_t x, std::int16_t y) noexcept {

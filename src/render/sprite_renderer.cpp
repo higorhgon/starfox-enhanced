@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -339,24 +340,23 @@ void SpriteRenderer::draw_objects(
     }
 }
 
-void SpriteRenderer::draw_meters(
+MeterRectangles meter_rectangles(
     const simulation::MeterState& meters,
-    Framebuffer& target,
+    std::uint32_t viewport_width,
     bool anchor_to_edges,
-    const HudLayout* hud_layout) const noexcept {
-    if (!meters.enabled) return;
-    const ScopedLayer meter_layer{target, PixelLayer::two_d};
-    const auto solid = [&target](
+    const HudLayout* hud_layout) noexcept {
+    MeterRectangles result;
+    if (!meters.enabled) return result;
+    const auto solid = [&result](
         std::int32_t x,
         std::int32_t y,
         std::int32_t width,
         std::int32_t height,
         std::uint8_t colour) {
-        for (std::int32_t row = 0; row < height; ++row) {
-            for (std::int32_t column = 0; column < width; ++column) {
-                target.set(x + column, y + row,
-                    static_cast<std::uint8_t>(7U * 16U + colour));
-            }
+        if(width>0 && height>0) {
+            // At most four meters, each containing four borders and one fill.
+            assert(result.count<result.rectangles.size());
+            result.rectangles[result.count++]={x,y,width,height,static_cast<std::uint8_t>(112U+colour)};
         }
     };
     const auto box = [&solid](std::int32_t x, std::int32_t y,
@@ -372,7 +372,7 @@ void SpriteRenderer::draw_meters(
     };
     const auto left_x = anchor_to_edges ? 24 : 8;
     const auto right_x = anchor_to_edges
-        ? static_cast<std::int32_t>(target.width()) - 64 : 176;
+        ? static_cast<std::int32_t>(viewport_width) - 64 : 176;
     const auto shield = hud_layout == nullptr
         ? HudOffset{} : (*hud_layout)[HudElement::shield];
     const auto boost = hud_layout == nullptr
@@ -383,9 +383,9 @@ void SpriteRenderer::draw_meters(
         const auto source_left_x = [anchor_to_edges](std::int32_t x) {
             return x + (anchor_to_edges ? 16 : 0);
         };
-        const auto source_right_x = [anchor_to_edges, &target](std::int32_t x) {
+        const auto source_right_x = [anchor_to_edges, viewport_width](std::int32_t x) {
             return anchor_to_edges
-                ? x + static_cast<std::int32_t>(target.width()) - 240
+                ? x + static_cast<std::int32_t>(viewport_width) - 240
                 : x;
         };
         if (meters.boost_enabled) {
@@ -437,12 +437,12 @@ void SpriteRenderer::draw_meters(
     if (static_cast<unsigned>(current) >= static_cast<unsigned>(maximum) + 10U) {
         current = 0U;
     }
-    if (maximum == 0U) return;
+    if (maximum == 0U) return result;
     const auto half_scale = (maximum & 0x80U) != 0U;
     auto meter_width = half_scale ? maximum >> 1U : maximum;
     meter_width = static_cast<std::uint8_t>(meter_width + 4U);
     const auto boss_x = (anchor_to_edges
-        ? static_cast<std::int32_t>(target.width()) - 18
+        ? static_cast<std::int32_t>(viewport_width) - 18
             - static_cast<std::int32_t>(meter_width)
         : 222 - static_cast<std::int32_t>(meter_width)) + boss.x;
     const auto boss_y = (meters.extended && meters.player_two_activated
@@ -450,6 +450,27 @@ void SpriteRenderer::draw_meters(
     box(boss_x, boss_y, meter_width, 6, 14U);
     if (half_scale) current >>= 1U;
     solid(boss_x + 2, boss_y + 2, current, 2, 2U);
+    return result;
 }
 
+void SpriteRenderer::draw_meters(const simulation::MeterState& meters,Framebuffer& target,
+    bool anchor_to_edges,const HudLayout* hud_layout) const noexcept {
+    const ScopedLayer meter_layer{target,PixelLayer::two_d};
+    const auto rectangles=meter_rectangles(meters,target.width(),anchor_to_edges,hud_layout);
+    for(std::size_t i=0;i<rectangles.count;++i) {
+        const auto& r=rectangles.rectangles[i];
+        for(int row=0;row<r.height;++row) for(int column=0;column<r.width;++column)
+            target.set(r.x+column,r.y+row,r.colour);
+    }
+}
+
+void SpriteRenderer::draw_completion_bar(std::uint8_t percentage, Framebuffer& target) const noexcept {
+    const auto fill = std::min<unsigned>(percentage, 100U);
+    for (int y = 0; y < 12; ++y) for (int x = 0; x < 104; ++x) {
+        if (x == 0 || x == 103 || y == 0 || y == 11)
+            target.set(60 + x, 24 + y, 7U * 16U + 14U);
+        else if (x >= 2 && static_cast<unsigned>(x - 2) < fill && y >= 2 && y < 10)
+            target.set(60 + x, 24 + y, 7U * 16U + 7U);
+    }
+}
 } // namespace starfox::render

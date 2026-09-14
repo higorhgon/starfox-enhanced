@@ -11,6 +11,8 @@ struct ReceiverPlane { Vec3 point, normal; };
 struct Camera {
     std::uint32_t width{}, height{};
     double focal_length{256}, center_x{112}, center_y{96};
+    double focal_length_y{}; // Zero retains square-pixel legacy projection.
+    double vertical_focal_length() const {return focal_length_y==0?focal_length:focal_length_y;}
 };
 
 // Geometry lives in camera space. Ground is supplied only in scenes with an
@@ -21,7 +23,7 @@ inline void render_mask(const Scene& scene, Camera camera, Vec3 toward_light,
     RowWorkers* workers = nullptr) {
     mask.assign(static_cast<std::size_t>(camera.width)*camera.height, 0);
     const auto length=std::sqrt(dot(toward_light,toward_light));
-    if (camera.focal_length<=0 || !std::isfinite(length) || length<=1e-10) return;
+    if (camera.focal_length<=0 || camera.vertical_focal_length()<=0 || !std::isfinite(camera.vertical_focal_length()) || !std::isfinite(length) || length<=1e-10) return;
     toward_light=toward_light*(1.0/length);
     const auto reference=std::abs(toward_light.y)<.9?Vec3{0,1,0}:Vec3{1,0,0};
     auto tangent=cross(toward_light,reference);
@@ -45,7 +47,7 @@ inline void render_mask(const Scene& scene, Camera camera, Vec3 toward_light,
     for (std::uint32_t y=first;y<last;++y) {
         for (std::uint32_t x=0;x<camera.width;++x) {
             const Vec3 ray{(double(x)+.5-camera.center_x)/camera.focal_length,
-                (double(y)+.5-camera.center_y)/camera.focal_length,1};
+                (double(y)+.5-camera.center_y)/camera.vertical_focal_length(),1};
             std::optional<double> ground_distance;
             if (ground) {
                 const auto denominator=dot(ray,ground->normal);

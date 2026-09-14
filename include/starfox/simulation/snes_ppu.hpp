@@ -6,6 +6,7 @@
 namespace starfox::simulation {
 
 struct SnesPpuState {
+    [[nodiscard]] bool operator==(const SnesPpuState&) const = default;
     std::array<std::uint8_t, 64U * 1024U> vram{};
     std::array<std::uint16_t, 256> cgram{};
     std::array<std::uint8_t, 544> oam{};

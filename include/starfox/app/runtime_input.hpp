@@ -123,12 +123,19 @@ struct PregameSettings {
     std::uint8_t bloom{};
     std::uint8_t bloom_2d{};
     std::uint8_t model_smoothing{};
-    // 0=English, 1=Japanese, 2=German, 3=French, 4=Spanish.
+    // 0=English, 1=Japanese, 2=German, 3=French, 4=Spanish, 5=English (Europe).
     std::uint8_t language{};
     std::uint8_t wireframe_thickness{1U}; // Legacy aggregate slot; no longer saved or applied.
-    bool enhanced_shadows{};
+    bool enhanced_shadows{}; // Legacy file compatibility only; ignored by renderer.
     std::uint8_t chromatic_aberration{};
     std::uint8_t hdr_effect{};
+    bool ray_tracing{};
+    bool infinite_bombs{};
+    bool infinite_boost{};
+    std::uint8_t default_laser{};
+    std::uint8_t selected_level{};
+    std::uint8_t stereo_output{}; // 0=OFF, 1=HALF SBS, 2=FULL SBS.
+    bool infinite_lives{};
 
     [[nodiscard]] bool operator==(const PregameSettings&) const = default;
 };

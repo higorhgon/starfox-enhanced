@@ -22,6 +22,24 @@ struct ObjectPresentationSnapshot {
 using ObjectSnapshotMap = std::unordered_map<simulation::ObjectHandle,
     ObjectPresentationSnapshot>;
 
+// FLASHPLAYER_STRAT is an attached visual, not an independently moving item.
+// It alternates NULLSHAPE/wireframe, which must not discard the owner's motion
+// history. Preserve the overlay's shape/colour lifetime but share ship poses.
+inline bool anchor_player_overlay(ObjectPresentationSnapshot& before,
+    ObjectPresentationSnapshot& now,const ObjectSnapshotMap& previous,
+    const ObjectSnapshotMap& current,simulation::ObjectHandle player) {
+    const auto owner=current.find(player);
+    if(owner==current.end()) return false;
+    const auto old=previous.find(player);
+    const auto& prior=old!=previous.end() && old->second.generation==owner->second.generation
+        && old->second.shape==owner->second.shape && old->second.type==owner->second.type
+        && old->second.strategy_address==owner->second.strategy_address
+        ? old->second : owner->second;
+    before.transform=prior.transform;before.rotation_matrix=prior.rotation_matrix;
+    now.transform=owner->second.transform;now.rotation_matrix=owner->second.rotation_matrix;
+    return true;
+}
+
 // UPDOORCOL_ISTRAT adds deg180 in one source tick to change the arrow's
 // direction. That is a discrete state change, not a rotating-door animation.
 inline simulation::MatrixQ15 interpolate_object_rotation(

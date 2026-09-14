@@ -76,6 +76,16 @@ void draw_line(
 
 } // namespace
 
+ParticleRenderer::OwnerFrame ParticleRenderer::prepare_owner(const simulation::ParticleSystem& particles,
+    simulation::ObjectHandle owner,const RenderPose& pose,double alpha,std::uint8_t colour_base) {
+    OwnerFrame result;result.owner=owner;result.pose=pose;result.alpha=alpha;result.colour_base=colour_base;
+    for(const auto& particle:particles.particles())
+        if(particle.life && particle.owner==owner) result.particles.push_back(particle);
+    return result;
+}
+void ParticleRenderer::draw_frame(const OwnerFrame& frame,Framebuffer& target) {
+    draw_particles(frame.particles,frame.owner,frame.pose,frame.alpha,target,frame.colour_base);
+}
 void ParticleRenderer::draw_owner(
     const simulation::ParticleSystem& particles,
     simulation::ObjectHandle owner,
@@ -83,10 +93,15 @@ void ParticleRenderer::draw_owner(
     double interpolation_alpha,
     Framebuffer& target,
     std::uint8_t colour_index_base) const {
+    draw_particles(particles.particles(),owner,owner_pose,interpolation_alpha,target,colour_index_base);
+}
+void ParticleRenderer::draw_particles(std::span<const simulation::ParticleState> particles,
+    simulation::ObjectHandle owner,const RenderPose& owner_pose,double interpolation_alpha,
+    Framebuffer& target,std::uint8_t colour_index_base) {
     // Particles are world-space geometry; see DustRenderer::draw.
     const ScopedLayer layer{target, PixelLayer::three_d};
     const auto alpha = std::clamp(interpolation_alpha, 0.0, 1.0);
-    for (const auto& particle : particles.particles()) {
+    for (const auto& particle : particles) {
         if (particle.life == 0U || particle.owner != owner) continue;
         const auto x = interpolate_word(
             particle.previous_x, particle.x, alpha);

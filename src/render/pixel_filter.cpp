@@ -43,6 +43,7 @@ std::string_view two_d_filter_name(TwoDFilter filter) noexcept {
     case TwoDFilter::xbrz: return "XBRZ";
     case TwoDFilter::sharp_bilinear: return "SHARP BILINEAR";
     case TwoDFilter::crt: return "CRT";
+    case TwoDFilter::scalefx: return "SCALEFX";
     case TwoDFilter::off: break;
     }
     return "OFF";
@@ -54,6 +55,7 @@ bool two_d_filter_compiled_in(TwoDFilter filter) noexcept {
     case TwoDFilter::edge:
     case TwoDFilter::sharp_bilinear:
     case TwoDFilter::crt:
+    case TwoDFilter::scalefx:
         return true;
     case TwoDFilter::xbrz:
 #ifdef STARFOX_ENABLE_XBRZ
@@ -248,7 +250,7 @@ bool filter_overlay_layer(
 
     auto backend = filter;
     if (!two_d_filter_compiled_in(backend)) backend = TwoDFilter::edge;
-    const std::size_t factor = backend == TwoDFilter::xbrz
+    const std::size_t factor = backend == TwoDFilter::scalefx ? 3U : backend == TwoDFilter::xbrz
         ? std::clamp<std::size_t>(render_scale, 2U, 6U)
         : std::max<std::size_t>(render_scale, 2U);
 
@@ -274,7 +276,9 @@ bool filter_overlay_layer(
     scratch.filtered.resize(cells * factor * factor);
     const auto* source = scratch.source.data();
     auto* filtered = scratch.filtered.data();
-    workers.parallel_rows(height,
+    if(backend==TwoDFilter::scalefx) {
+        scale_scalefx(scratch.source,scratch.filtered,width,height,scratch.scalefx,workers);
+    } else workers.parallel_rows(height,
         [&](std::uint32_t first, std::uint32_t last) {
 #ifdef STARFOX_ENABLE_XBRZ
             if (backend == TwoDFilter::xbrz) {
@@ -338,7 +342,7 @@ void apply_two_d_filter(
     // EDGE is defined at every integer factor, so it tracks RENDER UPSCALE all
     // the way to 10x. xBRZ tops out at 6x and is point-sampled the rest of the
     // way, which still resolves far more detail than block expansion.
-    const std::size_t factor = backend == TwoDFilter::xbrz
+    const std::size_t factor = backend == TwoDFilter::scalefx ? 3U : backend == TwoDFilter::xbrz
         ? std::clamp<std::size_t>(scale, 2U, 6U)
         : std::max<std::size_t>(scale, 2U);
 
@@ -391,7 +395,9 @@ void apply_two_d_filter(
     scratch.filtered.resize(cells * factor * factor);
     const auto* source = scratch.source.data();
     auto* filtered = scratch.filtered.data();
-    workers.parallel_rows(band_last - band_first,
+    if(backend==TwoDFilter::scalefx) {
+        scale_scalefx(scratch.source,scratch.filtered,width,height,scratch.scalefx,workers);
+    } else workers.parallel_rows(band_last - band_first,
         [&](std::uint32_t slice_first, std::uint32_t slice_last) {
             const auto y_first = band_first + slice_first;
             const auto y_last = band_first + slice_last;

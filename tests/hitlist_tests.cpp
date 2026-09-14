@@ -78,6 +78,30 @@ void check_reticle_identity() {
             && static_cast<std::uint16_t>(std::lround(r.z - p.z)) == 500,
             "new reticle jittered relative to interpolated player at coordinate wrap");
     }
+    starfox::render::ObjectSnapshotMap older, newer;
+    older[1].transform=old_player;newer[1].transform=player;
+    older[1].generation=newer[1].generation=3;
+    older[1].rotation_matrix={32767,0,0,0,32767,0,0,0,32767};
+    newer[1].rotation_matrix={0,32767,0,-32767,0,0,0,0,32767};
+    starfox::render::ObjectPresentationSnapshot old_flash,flash;
+    old_flash.shape=0;flash.shape=123;flash.transform=sight;
+    require(starfox::render::anchor_player_overlay(old_flash,flash,older,newer,1),
+        "upgrade overlay did not find its player");
+    for(unsigned phase=0;phase<=12;++phase) {
+        const auto alpha=phase/12.0;
+        const auto a=interpolate(old_flash.transform,flash.transform,alpha);
+        const auto b=interpolate(old_player,player,alpha);
+        require(a.x==b.x && a.y==b.y && a.z==b.z
+            && starfox::render::interpolate_object_rotation(old_flash,flash,alpha,0)
+                ==starfox::render::interpolate_object_rotation(older[1],newer[1],alpha,0),
+            "flashing upgrade wireframe diverged from player pose at high FPS");
+    }
+    require(old_flash.shape==0 && flash.shape==123,
+        "anchoring upgrade geometry changed its source blink state");
+    newer[1].generation=4;
+    starfox::render::anchor_player_overlay(old_flash,flash,older,newer,1);
+    require(old_flash.transform.x==flash.transform.x && old_flash.rotation_matrix==flash.rotation_matrix,
+        "upgrade overlay interpolated through a recycled player slot");
 }
 
 void check_escape_explosions(const starfox::assets::RomImage& rom,
@@ -321,6 +345,7 @@ void check_tunnel(const starfox::assets::RomImage& rom,
     ppu->bg2_character_base = 0;
     ppu->bg2_screen_size = 2;
     ppu->bg2_scanline_scroll_enabled = true;
+    ppu->tunnel_scene = true;
     for (unsigned row = 0; row < 224; ++row)
         ppu->bg2_scanline_scroll_y[row] = row % 2 ? 280 : 24;
     for (unsigned row = 0; row < 8; ++row) {
@@ -337,11 +362,19 @@ void check_tunnel(const starfox::assets::RomImage& rom,
         for (unsigned y = 16; y < 224; ++y)
             for (unsigned x = 0; x < width; ++x) {
                 const auto expected_pixel = x >= left && x < left + 256U
-                    ? (y % 2 ? 2U : 1U) : 0U;
+                    ? (y % 2 ? 2U : 1U) : 1U; // Center-height wall is tile 1.
                 require(frame.get(x, y) == expected_pixel,
                     "tunnel must retain native pages with solid outer margins");
             }
     }
+    // Scanline scrolling alone must not classify outdoor/animated backgrounds
+    // as closed tunnels: those keep their normal widescreen tile expansion.
+    ppu->tunnel_scene = false;
+    starfox::render::Framebuffer outdoor{400,224};
+    starfox::render::BackgroundRenderer{}.draw_bg2(*ppu,0,91,outdoor,
+        starfox::render::TilePriorityPass::all,72,true);
+    require(outdoor.get(0,32)==1 && outdoor.get(399,33)==2,
+        "non-tunnel scanline background lost widescreen tile expansion");
     std::cout << "32 source tunnel phases, override/exit, four viewport widths passed\n";
 }
 
@@ -470,6 +503,17 @@ void check_black_hole_music(const starfox::assets::RomImage& rom,
         "black-hole map failed to select/play source SPC track $0f without MSU");
     require(game->flow_state() == GameFlowState::planet_travel,
         "black-hole map auto-entered a level without confirmation");
+    {
+        auto display=game->restored_state(game->save_state());
+        const auto scratch=symbols.find("BUNNY").at(0);
+        display->map().write_native_byte(scratch,193);
+        static_cast<void>(display->map().read_native_byte(scratch));
+        const auto saved=display->save_state();
+        static_cast<void>(display->planet_presentation_state());
+        static_cast<void>(display->briefing_state());
+        require(display->save_state()==saved,
+            "planet/briefing presentation snapshot changed emulated state");
+    }
     std::cout << "source black-hole route selection and non-MSU music PCM passed\n";
 }
 

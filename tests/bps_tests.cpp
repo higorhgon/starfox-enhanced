@@ -153,6 +153,22 @@ int main(int argc, char** argv) {
                     crlf_manifest_resources),
             "runtime asset manifest changed across LF and CRLF checkouts");
 
+        {
+            const auto provider=+[](int id)->std::span<const std::uint8_t> {
+                static const auto bytes=[] {std::array<std::uint8_t,256> result{};
+                    for(unsigned i=0;i<result.size();++i) result[i]=static_cast<std::uint8_t>(i);return result;}();
+                return std::span<const std::uint8_t>(bytes).subspan(id,1);
+            };
+            std::array<starfox::assets::RuntimeManifestResource,11> expected{};
+            constexpr std::array ids{101,102,108,109,120,121,122,123,124,125,126};
+            for(unsigned i=0;i<ids.size();++i) expected[i]={provider(ids[i]),ids[i]==102 || ids[i]==109};
+            require(starfox::assets::runtime_companion_manifest(provider)==starfox::assets::runtime_asset_manifest(expected),
+                "shared companion resource order changed");
+            bool rejected=false;
+            try { (void)starfox::assets::runtime_companion_manifest(+[](int)->std::span<const std::uint8_t>{return {};}); }
+            catch(const std::runtime_error&) {rejected=true;}
+            require(rejected,"missing companion resource accepted");
+        }
         if (argc == 7 && std::string_view{argv[1]} == "--verify-bundle") {
             const auto encoded = load_bytes(argv[2]);
             const auto decoded = starfox::assets::decode_runtime_bundle(

@@ -128,6 +128,31 @@ std::int32_t mosaic_coordinate(
 
 } // namespace
 
+std::uint8_t tunnel_wall_index(const simulation::SnesPpuState& ppu) noexcept {
+    constexpr unsigned row=112;
+    const unsigned width=(ppu.bg2_screen_size&1U)?64U:32U;
+    const unsigned height=(ppu.bg2_screen_size&2U)?64U:32U;
+    const unsigned edge=ppu.bg2_tile_size_16?16U:8U;
+    const unsigned x=unsigned(ppu.bg2_horizontal_offsets_enabled
+        ?ppu.bg2_horizontal_offsets[row]:ppu.bg2_scroll_x)&(width*edge-1);
+    const unsigned y=(row+unsigned(ppu.bg2_scanline_scroll_enabled
+        ?ppu.bg2_scanline_scroll_y[row]:ppu.bg2_scroll_y))&(height*edge-1);
+    const unsigned tx=x/edge,ty=y/edge;
+    const unsigned entry=((ty/32)*(width/32)+tx/32)*1024+(ty%32)*32+tx%32;
+    const auto tile=vram_word(ppu,ppu.bg2_screen_base+entry);
+    const auto sample=tile_sample(tile,int(x),int(y),ppu.bg2_tile_size_16);
+    const auto ink=tile_pixel_4bpp(ppu,ppu.bg2_character_base,sample.tile,sample.x,sample.y);
+    if(ink) return std::uint8_t(((tile>>10)&7U)*16+ink);
+    unsigned darkest=std::numeric_limits<unsigned>::max();
+    std::uint8_t result=0;
+    for(unsigned i=0;i<256;++i) {
+        const auto c=ppu.cgram[i];
+        const unsigned luma=77U*(c&31U)+150U*((c>>5)&31U)+29U*((c>>10)&31U);
+        if(luma<darkest) {darkest=luma;result=std::uint8_t(i);}
+    }
+    return result;
+}
+
 void BackgroundRenderer::draw_bg1(
     const simulation::SnesPpuState& ppu,
     Framebuffer& target,
@@ -209,7 +234,8 @@ void BackgroundRenderer::draw_bg2(
     bool extend_horizontal,
     bool wrap_horizontal,
     bool transparent_cgram_black,
-    std::uint32_t single_occurrence_top_rows) const noexcept {
+    std::uint32_t single_occurrence_top_rows,
+    std::span<const BackgroundUniqueRegion> unique_regions) const noexcept {
     if ((ppu.main_screen & 0x02U) == 0U) return;
     const auto width_tiles = (ppu.bg2_screen_size & 1U) != 0U ? 64U : 32U;
     const auto height_tiles = (ppu.bg2_screen_size & 2U) != 0U ? 64U : 32U;
@@ -235,6 +261,7 @@ void BackgroundRenderer::draw_bg2(
             if (luma == 0U) break;
         }
     }
+    const auto wall_colour=ppu.tunnel_scene?tunnel_wall_index(ppu):black_colour;
     std::array<std::uint16_t, 32> vertical_offsets{};
     if (ppu.background_mode == 2U && ppu.bg2_vertical_offsets_enabled) {
         for (std::size_t index = 0; index < vertical_offsets.size(); ++index) {
@@ -359,8 +386,9 @@ void BackgroundRenderer::draw_bg2(
         : std::min(target.width(), static_cast<std::uint32_t>(
             std::max(horizontal_origin + 256, 0)));
     std::vector<std::int32_t> column_scroll_y;
+    constexpr auto no_column_scroll = std::numeric_limits<std::int32_t>::min();
     if (ppu.background_mode == 2U && ppu.bg2_vertical_offsets_enabled) {
-        column_scroll_y.resize(final_x - first_x, scroll_y);
+        column_scroll_y.resize(final_x - first_x, no_column_scroll);
         for (auto screen_x = first_x; screen_x < final_x; ++screen_x) {
             const auto logical_x = static_cast<std::int32_t>(screen_x)
                 - horizontal_origin;
@@ -382,7 +410,7 @@ void BackgroundRenderer::draw_bg2(
                     ? column_coordinate / 8
                     : -((-column_coordinate + 7) / 8);
                 column_scroll_y[screen_x - first_x] = extended_vertical_offset(
-                    visible_column, scroll_y);
+                    visible_column, no_column_scroll);
             }
         }
     }
@@ -453,6 +481,8 @@ void BackgroundRenderer::draw_bg2(
             ? static_cast<std::int32_t>(ppu.bg2_horizontal_offsets[
                 static_cast<std::size_t>(sample_y)])
             : scroll_x;
+        const auto unique_scroll_x = unique_regions.empty() ? 0
+            : wrap(row_scroll_x + width_pixels / 2, width_pixels) - width_pixels / 2;
         for (auto screen_x = first_x; screen_x < final_x; ++screen_x) {
             const auto logical_x = static_cast<std::int32_t>(screen_x)
                 - horizontal_origin;
@@ -461,7 +491,7 @@ void BackgroundRenderer::draw_bg2(
                 // Tunnel art is a closed, cartridge-width cross-section.
                 // Fill only the background; models/HUD still render wide.
                 target.set(static_cast<std::int32_t>(screen_x),
-                    static_cast<std::int32_t>(screen_y), black_colour);
+                    static_cast<std::int32_t>(screen_y), wall_colour);
                 continue;
             }
             const auto sample_x = mosaic_coordinate(
@@ -470,11 +500,15 @@ void BackgroundRenderer::draw_bg2(
                 sample_x + horizontal_origin,
                 static_cast<std::int32_t>(first_x),
                 static_cast<std::int32_t>(final_x - 1U));
-            const auto current_scroll_y = ppu.bg2_scanline_scroll_enabled
+            const auto register_scroll_y = ppu.bg2_scanline_scroll_enabled
                 ? ppu.bg2_scanline_scroll_y[std::clamp(sample_y, 0, 223)]
-                : column_scroll_y.empty() ? scroll_y
-                : column_scroll_y[static_cast<std::size_t>(sampled_screen_x)
-                    - first_x];
+                : scroll_y;
+            const auto tile_scroll_y = column_scroll_y.empty() ? no_column_scroll
+                : column_scroll_y[static_cast<std::size_t>(sampled_screen_x) - first_x];
+            // A valid Mode 2 per-tile offset replaces BG2VOFS, including
+            // scanline/HDMA writes. Invalid entries still use that register.
+            const auto current_scroll_y = tile_scroll_y != no_column_scroll
+                ? tile_scroll_y : register_scroll_y;
             const auto source_y = wrap(
                 sample_y + current_scroll_y,
                 height_pixels);
@@ -503,15 +537,9 @@ void BackgroundRenderer::draw_bg2(
             }
             const auto tile_y = static_cast<std::uint32_t>(source_y) / tile_edge;
             const auto unwrapped_source_x = sample_x + row_scroll_x;
-            // Tunnel floor/ceiling artwork is one authored cross-section,
-            // not a repeatable landscape. Retain native wrapping inside the
-            // cartridge raster, but stop additional copies in wide margins.
-            // Anchor the single copy around the scrolled native centre.
-            if (ppu.bg2_scanline_scroll_enabled && extend_horizontal
-                && target.width() > 256U && (logical_x < 0 || logical_x >= 256)) {
-                const auto tunnel_x = wrap(128 + row_scroll_x, width_pixels) + sample_x - 128;
-                if (tunnel_x < 0 || tunnel_x >= width_pixels) continue;
-            }
+            // Scanline scrolling also drives open water (Titania). It is not
+            // evidence of a closed tunnel. Actual tunnel margins were handled
+            // above via tunnel_scene; water continues its edge material below.
             // A scrolling 256-pixel title tilemap normally wraps the portion
             // that leaves one side back onto the other. In a wide viewport we
             // instead draw that one tilemap occurrence beyond the native
@@ -538,7 +566,18 @@ void BackgroundRenderer::draw_bg2(
                     static_cast<std::int32_t>(screen_y), black_colour);
                 continue;
             }
-            const auto source_x = wrap(unwrapped_source_x, width_pixels);
+            auto source_x = wrap(unwrapped_source_x, width_pixels);
+            if (ppu.background_mode == 1U
+                && ppu.bg2_scanline_scroll_enabled && !ppu.tunnel_scene
+                && extend_horizontal && (logical_x < 0 || logical_x >= 256)) {
+                // Mode 1 water's BG2 contains one bridge/floor cross-section; BG3 is
+                // its independently repeating mountain/sky backdrop. Expose
+                // one scrolled BG2 tilemap, then continue its edge material
+                // rather than wrapping a second bridge into ultrawide edges.
+                // Mode 2 open water (EX 6-2) is a repeating landscape instead.
+                const auto water_x = wrap(128 + row_scroll_x, width_pixels) + sample_x - 128;
+                source_x = std::clamp(water_x, 0, width_pixels - 1);
+            }
             const auto tile_x = static_cast<std::uint32_t>(source_x) / tile_edge;
             const auto page = (tile_x >> 5U) + (tile_y >> 5U) * pages_wide;
             const auto entry = page * 0x400U
@@ -568,8 +607,23 @@ void BackgroundRenderer::draw_bg2(
                 continue;
             }
             if (colour != 0U) {
-                const auto indexed_colour = static_cast<std::uint8_t>(
+                auto indexed_colour = static_cast<std::uint8_t>(
                     palette * 16U + colour);
+                // Scroll registers wrap; 8191 is -1, not a distant copy of
+                // the map. Anchor the unique occurrence around the view.
+                const auto unique_source_x = sample_x + unique_scroll_x;
+                for (const auto& region : unique_regions) {
+                    if (extend_horizontal
+                        && (logical_x < 0 || logical_x >= 256)
+                        && (unique_source_x < 0 || unique_source_x >= width_pixels)
+                        && source_x >= region.left && source_x < region.right
+                        && source_y >= region.top && source_y < region.bottom
+                        && indexed_colour >= region.first_colour
+                        && indexed_colour <= region.last_colour) {
+                        indexed_colour = region.replacement_colour;
+                        break;
+                    }
+                }
                 if (transparent_cgram_black
                     && (ppu.cgram[indexed_colour] & 0x7fffU) == 0U) {
                     continue;
@@ -662,7 +716,7 @@ void BackgroundRenderer::draw_title_foreground(
         // Only tile colour zero is transparent. BG2's prompt outline and
         // other opaque black foreground pixels must cover the model too.
         draw_bg1(ppu, target, TilePriorityPass::all,
-            horizontal_origin, false, 0U, false);
+            horizontal_origin, false, extend_bg2_unwrapped ? 16U : 0U, false);
     }
     draw_bg3(ppu, target, TilePriorityPass::high,
         horizontal_origin, false);

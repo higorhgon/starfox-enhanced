@@ -25,6 +25,11 @@ struct RuntimeManifestResource {
 [[nodiscard]] std::uint32_t runtime_asset_manifest(
     std::span<const RuntimeManifestResource> resources);
 
+// Shared resource order for the builder and every runtime, including VR.
+// Missing resources reject rather than producing a partial compatibility ID.
+[[nodiscard]] std::uint32_t runtime_companion_manifest(
+    std::span<const std::uint8_t> (*resource)(int));
+
 // Starfox-Assets.BIN is generated locally from the user's retail v1.2 ROM.
 // The manifest binds it to the precise embedded patches/symbol tables in the
 // executable, so stale companions cannot silently mix incompatible code/data.

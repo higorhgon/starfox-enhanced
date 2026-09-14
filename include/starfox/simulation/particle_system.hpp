@@ -6,12 +6,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace starfox::simulation {
 
 inline constexpr std::size_t kMaximumParticles = 300;
 
 struct ParticleState {
+    [[nodiscard]] bool operator==(const ParticleState&) const = default;
     std::uint8_t life{};
     std::uint8_t flags{};
     std::uint8_t colour{};
@@ -39,6 +42,8 @@ public:
         std::uint32_t circle_table) noexcept;
 
     void reset() noexcept;
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    void load_state(std::span<const std::uint8_t> bytes);
     void tick(const ObjectPool& objects, bool enabled);
 
     [[nodiscard]] const std::array<ParticleState, kMaximumParticles>& particles()

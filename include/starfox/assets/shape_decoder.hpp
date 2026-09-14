@@ -38,6 +38,7 @@ private:
     std::uint32_t texture_address_table_{};
     std::uint32_t texture_coordinate_table_{};
     std::uint8_t colour_table_bank_{0x03U};
+    std::uint16_t default_colour_pointer_{0x8213U};
     DiffuseShadeTables diffuse_shade_tables_{};
     bool has_diffuse_shade_tables_{};
     bool has_lod_pointers_{true};

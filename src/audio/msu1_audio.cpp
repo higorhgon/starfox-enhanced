@@ -1,4 +1,7 @@
 #include "starfox/audio/msu1_audio.hpp"
+#include "starfox/assets/bps.hpp"
+#include "starfox/state/archive.hpp"
+#include "starfox/state/container.hpp"
 
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
@@ -99,6 +102,7 @@ bool Msu1Audio::load_selected_track() {
     source_channels_ = channels;
     source_frames_ = frames;
     loaded_track_ = selected_track_;
+    loaded_crc_ = assets::crc32(bytes);
     source_cursor_ = 0.0;
 
     // The source pack's tracks.json asks MSUPCM++ for -18 dB normalization,
@@ -119,6 +123,52 @@ bool Msu1Audio::load_selected_track() {
     normalization_gain_ = rms > 0.0 ? target / rms : 1.0;
     normalization_gain_ = std::min(normalization_gain_, 32767.0 / peak);
     return true;
+}
+
+std::vector<std::uint8_t> Msu1Audio::save_state() const {
+    state::Writer writer;
+    writer(selected_track_, loaded_track_, loaded_crc_, source_sample_rate_,
+        source_channels_, source_frames_, source_cursor_, normalization_gain_,
+        volume_, enabled_, paused_, playing_, repeat_, staff_roll_completed_);
+    return state::pack(0x4d535501U, 0U, writer.bytes());
+}
+
+void Msu1Audio::load_state(std::span<const std::uint8_t> bytes) {
+    state::Reader reader{state::unpack(bytes, 0x4d535501U, 0U)};
+    Msu1Audio restored{loader_};
+    std::uint16_t loaded{};
+    std::uint32_t crc{}, rate{}, channels{};
+    std::uint64_t frames{};
+    reader(restored.selected_track_, loaded, crc, rate, channels, frames,
+        restored.source_cursor_, restored.normalization_gain_, restored.volume_,
+        restored.enabled_, restored.paused_, restored.playing_, restored.repeat_,
+        restored.staff_roll_completed_);
+    reader.finish();
+    if (!std::isfinite(restored.source_cursor_) || restored.source_cursor_ < 0.0
+        || !std::isfinite(restored.normalization_gain_)
+        || restored.normalization_gain_ <= 0.0
+        || (restored.playing_ && (!restored.enabled_ || loaded == 0U))
+        || (restored.staff_roll_completed_ && (loaded != 49U || restored.playing_)))
+        throw std::runtime_error{"Invalid MSU playback state"};
+    if (loaded != 0U) {
+        // Track selection can be partially written while another track plays.
+        const auto selected = restored.selected_track_;
+        const auto cursor = restored.source_cursor_;
+        const auto gain = restored.normalization_gain_;
+        restored.selected_track_ = loaded;
+        if (!restored.load_selected_track() || restored.loaded_crc_ != crc
+            || restored.source_sample_rate_ != rate
+            || restored.source_channels_ != channels || restored.source_frames_ != frames
+            || cursor > static_cast<double>(frames) + static_cast<double>(rate))
+            throw std::runtime_error{"MSU save-state track is missing or changed"};
+        restored.selected_track_ = selected;
+        restored.source_cursor_ = cursor;
+        restored.normalization_gain_ = gain;
+    } else if (crc != 0U || rate != 0U || channels != 0U || frames != 0U
+        || restored.source_cursor_ != 0.0 || restored.normalization_gain_ != 1.0) {
+        throw std::runtime_error{"Invalid empty MSU state"};
+    }
+    *this = std::move(restored);
 }
 
 std::span<const std::int16_t> Msu1Audio::render(

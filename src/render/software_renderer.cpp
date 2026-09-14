@@ -1,4 +1,6 @@
 #include "starfox/render/software_renderer.hpp"
+#include "starfox/render/face_material.hpp"
+#include "starfox/render/source_shading.hpp"
 #include "starfox/render/shadow_scene.hpp"
 
 #include "starfox/simulation/math.hpp"
@@ -32,17 +34,6 @@ struct ScreenPoint {
     double y{};
     double z{};
     bool visible{};
-};
-
-struct FaceColour {
-    std::uint8_t even{};
-    std::uint8_t odd{};
-    bool dither{};
-};
-
-struct FaceMaterial {
-    FaceColour colour{};
-    const assets::TextureImage* texture{};
 };
 
 struct TexturePoint {
@@ -701,6 +692,19 @@ std::int32_t source_fixed_integer(std::int16_t value) noexcept {
     return static_cast<std::uint16_t>(value) >> 8U;
 }
 
+bool record_span(Framebuffer& target,int left,int right,int y,FaceColour colour,
+    std::uint8_t base,SurfaceBuffer* surfaces,const SurfaceSample& surface) {
+    auto* commands=target.command_buffer();
+    if(!commands || target.draw_scale()!=1) return false;
+    RasterCommand command;
+    command.left=left;command.right=right+1;command.top=y;command.bottom=y+1;
+    command.even=std::uint8_t(base+colour.even);command.odd=std::uint8_t(base+colour.odd);
+    command.dither=colour.dither;command.tag=target.layer_override()<0?1:target.layer_override();
+    command.has_surface=surfaces!=nullptr;
+    command.surface={surface.normal_x,surface.normal_y,surface.normal_z,surface.depth};
+    commands->add(command);return true;
+}
+
 void fill_source_polygon(
     Framebuffer& target,
     const std::vector<RasterVertex>& polygon,
@@ -849,6 +853,7 @@ void fill_source_polygon(
         if (winding_independent && x2 < x1) std::swap(x1, x2);
         if (x2 >= x1) {
             const auto plot = [&](std::int32_t x, std::int32_t plot_y) {
+                if(record_span(target,x,x,plot_y,colour,colour_index_base,surfaces,surface)) return;
                 const auto palette_index = static_cast<std::uint8_t>(colour_index_base
                     + (colour.dither && ((x ^ plot_y) & 1) != 0
                         ? colour.odd : colour.even));
@@ -879,11 +884,13 @@ void fill_source_polygon(
             } else if (pose.cel_mode && pose.wireframe_mode == 0U) {
                 // hlines2rr cancels PLOT's automatic X increment and skips
                 // the two span endpoints, leaving the source cel outline.
-                for (auto x = x1 + 1; x < x2; ++x) plot(x, y);
+                if(!record_span(target,x1+1,x2-1,y,colour,colour_index_base,surfaces,surface))
+                    for (auto x = x1 + 1; x < x2; ++x) plot(x, y);
             } else if (pose.wave_mode && pose.wireframe_mode == 0U) {
                 for (auto x = x1; x <= x2; ++x) plot(x, wave_y(x, y));
             } else {
-                for (auto x = x1; x <= x2; ++x) plot(x, y);
+                if(!record_span(target,x1,x2,y,colour,colour_index_base,surfaces,surface))
+                    for (auto x = x1; x <= x2; ++x) plot(x, y);
             }
         }
         if ((pose.wobble_mode & 2U) != 0U) {
@@ -1080,7 +1087,19 @@ void fill_source_textured_polygon(
                 starfox::simulation::subtract16(span_right_v, span_v), reciprocal);
             auto u = span_u;
             auto v = span_v;
-            for (auto x = x1; x <= x2; ++x) {
+            auto* commands=target.command_buffer();
+            if(commands && target.draw_scale()==1) {
+                RasterCommand command;
+                command.left=x1;command.right=x2+1;command.top=y;command.bottom=y+1;
+                command.tag=std::uint32_t(PixelLayer::textured_geometry);command.textured=1;
+                command.texture_offset=commands->texture(texture.texels);
+                command.u_mask=texture.u_mask;command.v_mask=texture.v_mask;command.colour_base=colour_index_base;
+                command.u=std::uint16_t(u);command.v=std::uint16_t(v);command.du=u_increment;command.dv=v_increment;
+                command.reserved0=std::uint32_t(texture_scroll_x);command.reserved1=std::uint32_t(texture_scroll_y);
+                command.has_surface=surfaces!=nullptr;
+                command.surface={surface.normal_x,surface.normal_y,surface.normal_z,surface.depth};
+                commands->add(command);
+            } else for (auto x = x1; x <= x2; ++x) {
                 const auto sample_u = (source_fixed_integer(u)
                     + texture_scroll_x) & texture.u_mask;
                 const auto sample_v = (source_fixed_integer(v)
@@ -1132,6 +1151,16 @@ void draw_line(
         * std::clamp<unsigned>(wireframe_thickness, 1U, 4U));
     const auto offset = (thickness - 1) / 2;
     const auto plot = [&] {
+        if(auto* commands=target.command_buffer()) {
+            RasterCommand command;
+            command.left=x0-offset;command.top=y0-offset;
+            command.right=command.left+thickness;command.bottom=command.top+thickness;
+            command.even=std::uint8_t(colour_index_base+colour.even);
+            command.odd=std::uint8_t(colour_index_base+colour.odd);command.dither=colour.dither;
+            command.reserved0=dither_scale;
+            command.tag=target.layer_override()<0?1:target.layer_override();
+            commands->add(command);return;
+        }
         // Keep one logical pixel of wire thickness when the model raster is
         // supersampled. A single stored pixel shrinks to 1/scale on screen.
         for (int row = 0; row < thickness; ++row) {
@@ -1209,6 +1238,15 @@ void draw_textured_sprite(
     auto source_y_fixed = starfox::simulation::wrap16(
         static_cast<std::int64_t>(source_width / 2) * 256
         + static_cast<std::int64_t>(top - centre_y) * increment);
+    if(auto* commands=target.command_buffer()) {
+        const int scale=int(target.draw_scale());RasterCommand command;
+        command.left=left*scale;command.top=top*scale;command.right=(right+1)*scale;command.bottom=(bottom+1)*scale;
+        command.textured=3;command.texture_offset=commands->texture(texture.texels);
+        command.u_mask=texture.u_mask;command.v_mask=texture.v_mask;command.colour_base=colour_index_base;
+        command.u=source_width/2*256+(left-centre_x)*increment;command.v=source_y_fixed;
+        command.du=increment;command.dv=scale;command.tag=target.layer_override()<0?1:target.layer_override();
+        commands->add(command);return;
+    }
     for (auto y = top; y <= bottom; ++y) {
         const auto source_y = static_cast<std::uint32_t>(
             static_cast<std::uint16_t>(source_y_fixed) >> 8U);
@@ -1233,26 +1271,6 @@ void draw_textured_sprite(
         source_y_fixed = starfox::simulation::add16(
             source_y_fixed, static_cast<std::int16_t>(increment));
     }
-}
-
-const assets::TextureImage* texture_for_colour(
-    const assets::Shape& shape,
-    std::uint8_t colour,
-    std::uint32_t colour_frame) {
-    if (colour >= shape.colour_words.size()) return nullptr;
-    auto descriptor = shape.colour_words[colour];
-    if (colour < shape.colour_materials.size()) {
-        const auto& material = shape.colour_materials[colour];
-        if (!material.animation_frames.empty()) {
-            descriptor = material.animation_frames[
-                colour_frame % material.animation_frames.size()];
-        }
-    }
-    const auto texture = std::find_if(
-        shape.textures.begin(), shape.textures.end(), [descriptor](const auto& candidate) {
-            return candidate.descriptor == descriptor;
-        });
-    return texture == shape.textures.end() ? nullptr : &*texture;
 }
 
 void draw_simple_scaled_sprite(
@@ -1281,6 +1299,17 @@ void draw_simple_scaled_sprite(
         last_x = std::min(last_x, pose.effect_clip_right - left);
     }
     if (first_x >= last_x) return;
+    if(auto* commands=target.command_buffer()) {
+        const int scale=int(target.draw_scale());RasterCommand command;
+        command.left=(left+first_x)*scale;command.right=(left+last_x)*scale;
+        command.top=top*scale;command.bottom=(top+dimension)*scale;
+        command.textured=2;command.texture_offset=commands->texture(texture.texels);
+        command.u_mask=texture.u_mask;command.v_mask=texture.v_mask;command.colour_base=colour_index_base;
+        command.u=left*scale;command.v=top*scale;command.du=dimension;command.dv=scale;
+        command.tag=target.layer_override()<0?1:target.layer_override();
+        if(pose.palette_override) command.reserved0=256U+*pose.palette_override;
+        commands->add(command);return;
+    }
     for (auto y = 0; y < dimension; ++y) {
         const auto source_y = std::min(source_height - 1,
             static_cast<int>(static_cast<std::int64_t>(y) * source_height / dimension));
@@ -1299,70 +1328,6 @@ void draw_simple_scaled_sprite(
     }
 }
 
-FaceMaterial face_material(
-    const assets::Shape& shape,
-    const assets::Face& face,
-    std::uint32_t colour_frame,
-    std::size_t depth_band,
-    const std::array<std::int8_t, 3>& light,
-    const RenderPose& pose,
-    std::optional<std::uint16_t> descriptor_override = std::nullopt,
-    std::uint8_t colour_index_base = 0U) {
-    if (pose.palette_override) {
-        const auto relative = static_cast<std::uint8_t>(*pose.palette_override - colour_index_base);
-        return {{relative, relative, false}, nullptr};
-    }
-    if (pose.force_colour) {
-        const auto even = static_cast<std::uint8_t>(pose.forced_colour & 0x0fU);
-        const auto odd = static_cast<std::uint8_t>(pose.forced_colour >> 4U);
-        return {{even, odd, even != odd}, nullptr};
-    }
-    if (!descriptor_override && face.colour_id >= shape.colour_words.size()) {
-        const auto fallback = static_cast<std::uint8_t>(face.colour_id & 0x0fU);
-        return {{fallback, fallback, false}, nullptr};
-    }
-    auto word = descriptor_override.value_or(shape.colour_words[face.colour_id]);
-    if (!descriptor_override && face.colour_id < shape.colour_materials.size()) {
-        const auto& material = shape.colour_materials[face.colour_id];
-        if (!material.animation_frames.empty()) {
-            word = material.animation_frames[
-                colour_frame % material.animation_frames.size()];
-        }
-    }
-    if ((word & 0xc000U) == 0x4000U) {
-        const auto texture = std::find_if(
-            shape.textures.begin(), shape.textures.end(), [word](const auto& candidate) {
-                return candidate.descriptor == word;
-            });
-        return {{15, 15, false},
-            texture == shape.textures.end() ? nullptr : &*texture};
-    }
-    // COLSMOOTH sets both descriptor flag bits. It is not an ordinary
-    // two-nibble colour: the low nibble names the solid material and MOBJ's
-    // smooth-shade path supplies coverage separately. Treating $C909 as $09
-    // produced a black/green checkerboard on every render scale (most visible
-    // at 10x). Retain the descriptor's actual material as a solid face rather
-    // than inventing an alternating black nibble.
-    if ((word & 0xc000U) == 0xc000U) {
-        const auto colour = static_cast<std::uint8_t>(word & 0x0fU);
-        return {{colour, colour, false}, nullptr};
-    }
-    const auto material = static_cast<std::uint8_t>(word >> 8U);
-    auto byte = static_cast<std::uint8_t>(word);
-    if (material < 62U && shape.has_diffuse_shade_tables
-        && material < shape.diffuse_shade_tables[depth_band].size()) {
-        const auto dot = face.normal.x * light[0]
-            + face.normal.y * light[1] + face.normal.z * light[2];
-        const auto intensity = std::clamp(dot >> 10, 6, 15);
-        byte = shape.diffuse_shade_tables[depth_band][material][
-            static_cast<std::size_t>(intensity - 6)];
-    } else if (material == 62U && pose.has_depth_colour_tables) {
-        byte = pose.depth_colour_tables[depth_band][byte & 0x1fU];
-    }
-    auto even = static_cast<std::uint8_t>(byte & 0x0fU);
-    auto odd = static_cast<std::uint8_t>(byte >> 4U);
-    return {{even, odd, even != odd}, nullptr};
-}
 
 } // namespace
 
@@ -1517,11 +1482,22 @@ void apply_source_depth_tables(
 }
 
 void SoftwareRenderer::draw(
+    const assets::Shape& shape,const RenderPose& pose,Framebuffer& target,bool clear_target,
+    SurfaceBuffer* surfaces,shadows::Scene* shadow_scene,RenderDiagnostics* diagnostics) const {
+    draw_impl(shape,pose,target,clear_target,surfaces,shadow_scene,diagnostics,false);
+}
+void SoftwareRenderer::collect_shadow_casters(const assets::Shape& shape,const RenderPose& pose,shadows::Scene& scene) const {
+    Framebuffer unused(1,1);
+    draw_impl(shape,pose,unused,false,nullptr,&scene,nullptr,true);
+}
+void SoftwareRenderer::draw_impl(
     const assets::Shape& shape,
     const RenderPose& pose,
     Framebuffer& target,
     bool clear_target,
-    SurfaceBuffer* surfaces, shadows::Scene* shadow_scene) const {
+    SurfaceBuffer* surfaces, shadows::Scene* shadow_scene,
+    RenderDiagnostics* axis_diagnostics,bool shadow_only) const {
+    if (axis_diagnostics) *axis_diagnostics = {};
     // Everything this renderer emits is the Super FX layer, whatever draw
     // scale each path happens to use. Scan conversion drops the scale to 1 and
     // would derive that correctly on its own, but the sprite paths below
@@ -1535,8 +1511,6 @@ void SoftwareRenderer::draw(
         target.clear(settings_.background_colour);
         if (surfaces != nullptr) surfaces->clear();
     }
-    const auto word_exact = pose.use_rotation_matrix
-        && !pose.subpixel_projection;
     // Interpolated presentation frames already keep fractional transformed
     // vertices. At a completed 20 Hz source frame the source-exact path
     // quantizes them again; that single-frame snap is hidden by the native
@@ -1547,8 +1521,6 @@ void SoftwareRenderer::draw(
     // completed 20 Hz frame.
     const auto continuous_geometry = settings_.render_scale > 1U
         || pose.continuous_geometry;
-    const auto continuous_upscaled_geometry = continuous_geometry
-        && !pose.subpixel_projection;
     auto raster_pose = pose;
     if (continuous_geometry) {
         raster_pose.subpixel_projection = true;
@@ -1556,6 +1528,7 @@ void SoftwareRenderer::draw(
     const auto raster_word_exact = raster_pose.use_rotation_matrix
         && !raster_pose.subpixel_projection;
     if (pose.simple_scaled_sprite) {
+        if(shadow_only) return;
         const auto* texture = texture_for_colour(
             shape, pose.simple_sprite_colour, pose.colour_frame);
         if (texture != nullptr) {
@@ -1572,68 +1545,34 @@ void SoftwareRenderer::draw(
     }
     std::vector<Vec3> transformed_vertices;
     std::vector<ScreenPoint> projected;
-    std::vector<Vec3> upscaled_vertices;
-    std::vector<ScreenPoint> upscaled_projected;
     const auto& vertices = shape.frames.empty()
         ? shape.vertices
         : shape.frames[pose.animation_frame % shape.frames.size()].vertices;
-    const auto shading_depth = pose.use_source_lighting_state
-        ? pose.source_depth : pose.z;
-    auto depth_band = std::size_t{};
-    while (depth_band < pose.depth_thresholds.size()
-           && shading_depth >= pose.depth_thresholds[depth_band]) {
-        ++depth_band;
-    }
-    std::array<std::int8_t, 3> light{73, 73, 73};
-    if (pose.use_rotation_matrix) {
-        // Point rotation consumes the columns of m_mat, but initlight's three
-        // MDOTPROD16MQ calls explicitly consume its rows. Transpose before
-        // using the shared column-vector helper so the source light follows
-        // object orientation instead of being rotated by the inverse basis.
-        const auto& lighting_matrix = pose.use_source_lighting_state
-            ? pose.source_lighting_matrix : pose.rotation_matrix;
-        const auto transformed_light = starfox::simulation::transform_q15(
-            starfox::simulation::transpose_q15(lighting_matrix),
-            {18'917, 18'917, 18'917});
-        for (std::size_t index = 0; index < light.size(); ++index) {
-            light[index] = std::bit_cast<std::int8_t>(static_cast<std::uint8_t>(
-                std::bit_cast<std::uint16_t>(transformed_light[index]) >> 8U));
-        }
-    }
+    const auto shading = source_shading(pose);
+    const auto depth_band = shading.depth_band;
+    const auto& light = shading.light;
     transformed_vertices.reserve(vertices.size());
     projected.reserve(vertices.size());
-    if (continuous_upscaled_geometry) {
-        upscaled_vertices.reserve(vertices.size());
-        upscaled_projected.reserve(vertices.size());
-    }
     const auto& word_coordinates = shape.frames.empty()
         ? shape.word_coordinates
         : shape.frames[pose.animation_frame % shape.frames.size()].word_coordinates;
     for (std::size_t index = 0; index < vertices.size(); ++index) {
         const auto& point = vertices[index];
         const auto word = index < word_coordinates.size() && word_coordinates[index];
-        auto point_pose = pose;
         auto point_raster_pose = raster_pose;
         if (word) {
-            point_pose.scale = 1.0;
             point_raster_pose.scale = 1.0;
         }
         const auto shift = word ? 0U : shape.header.shift;
-        const auto transformed = rotate(point, point_pose, shift);
+        // Rasterization, visibility, BSP ordering and shadow casters all use
+        // the same selected geometry. The old source-exact second copy was
+        // unused whenever continuous geometry selected the fractional copy.
+        const auto transformed = rotate(point, point_raster_pose, shift);
         transformed_vertices.push_back(transformed);
-        if (continuous_upscaled_geometry) {
-            const auto upscaled = rotate(
-                point, point_raster_pose, shift);
-            upscaled_vertices.push_back(upscaled);
-            upscaled_projected.push_back(project_point(
-                upscaled, settings_.focal_length,
-                raster_word_exact, raster_pose.vanish_x,
-                raster_pose.vanish_y, raster_pose.subpixel_projection));
-        }
-        projected.push_back(project_point(
+        if(!shadow_only) projected.push_back(project_point(
             transformed, settings_.focal_length,
-            word_exact, pose.vanish_x, pose.vanish_y,
-            pose.subpixel_projection));
+            raster_word_exact, raster_pose.vanish_x, raster_pose.vanish_y,
+            raster_pose.subpixel_projection));
     }
     if (shadow_scene != nullptr) {
         // Casters include faces hidden from the camera: they can still block
@@ -1643,8 +1582,7 @@ void SoftwareRenderer::draw(
             if (face.sprite || face.vertex_indices.size() < 3U) continue;
             const auto offset = explosion_offset(face, pose);
             const auto point = [&](std::size_t index) {
-                const auto& p = continuous_upscaled_geometry
-                    ? upscaled_vertices[index] : transformed_vertices[index];
+                const auto& p = transformed_vertices[index];
                 return shadows::Vec3{p.x + offset.x, p.y + offset.y, p.z + offset.z};
             };
             const auto first = face.vertex_indices[0];
@@ -1656,11 +1594,10 @@ void SoftwareRenderer::draw(
             }
         }
     }
-    const auto& raster_vertices = continuous_upscaled_geometry
-        ? upscaled_vertices : transformed_vertices;
+    if(shadow_only) return;
+    const auto& raster_vertices = transformed_vertices;
     const auto& visibility_vertices = raster_vertices;
-    const auto& visibility_projected = continuous_upscaled_geometry
-        ? upscaled_projected : projected;
+    const auto& visibility_projected = projected;
     const auto face_visible = [&](const assets::Visibility& visibility) {
         return continuous_geometry
             ? continuous_visibility(visibility, visibility_vertices)
@@ -1734,6 +1671,7 @@ void SoftwareRenderer::draw(
             far_axis.x /= static_cast<double>(far_count);
             far_axis.y /= static_cast<double>(far_count);
             far_axis.z /= static_cast<double>(far_count);
+            if (axis_diagnostics) axis_diagnostics->camera = {{{near_axis.x,near_axis.y,near_axis.z},{far_axis.x,far_axis.y,far_axis.z}}};
             if (clip_near_line(near_axis, far_axis, raster_word_exact)) {
                 auto near_screen = project_point(near_axis, settings_.focal_length,
                     raster_word_exact, raster_pose.vanish_x,
@@ -1741,8 +1679,13 @@ void SoftwareRenderer::draw(
                 auto far_screen = project_point(far_axis, settings_.focal_length,
                     raster_word_exact, raster_pose.vanish_x,
                     raster_pose.vanish_y, raster_pose.subpixel_projection);
+                if (axis_diagnostics) axis_diagnostics->projected = {{{near_screen.x,near_screen.y},{far_screen.x,far_screen.y}}};
                 if (clip_screen_line(near_screen, far_screen, target,
                         raster_word_exact)) {
+                    if (axis_diagnostics) {
+                        axis_diagnostics->clipped = {{{near_screen.x,near_screen.y},{far_screen.x,far_screen.y}}};
+                        axis_diagnostics->visible = true;
+                    }
                     const auto material = face_material(shape, shape.faces.front(),
                         pose.colour_frame, depth_band, light, pose,
                         next_colour_warp_word(), settings_.colour_index_base);
@@ -1957,6 +1900,13 @@ void SoftwareRenderer::draw(
             const auto& a = polygon[index];
             const auto& b = polygon[(index + 1U) % polygon.size()];
             signed_area += a.x * b.y - b.x * a.y;
+        }
+        if (axis_diagnostics) {
+            PolygonRenderDiagnostics trace;
+            for (const auto& point : camera_polygon) trace.camera.push_back({point.x,point.y,point.z});
+            for (const auto& point : polygon) trace.projected.push_back({point.x,point.y});
+            trace.signed_area=signed_area;
+            axis_diagnostics->polygons.push_back(std::move(trace));
         }
         if (settings_.backface_culling && !face.sprite && signed_area >= 0.0) {
             continue;

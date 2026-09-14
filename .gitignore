@@ -22,6 +22,12 @@ Starfox-Assets.BIN
 /platform/android/app/.cxx/
 /platform/android/app/build/
 /platform/android/app/libs/*.aar
+/platform/android/build/
+/platform/android/local.properties
+/platform/quest/.cxx/
+/platform/quest/build/
 /tmp/
+/dist/
+/Android/
 __pycache__/
 *.pyc

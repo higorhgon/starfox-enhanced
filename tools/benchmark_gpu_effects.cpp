@@ -24,7 +24,8 @@ int main() {
         SDL_GPUDevice* value{};
         SDL_GPUDevice* Get() {return value;}
         ~Device(){if(value) SDL_DestroyGPUDevice(value);SDL_Quit();}
-    } device{SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV|SDL_GPU_SHADERFORMAT_MSL,true,nullptr)};
+    } device{SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV|SDL_GPU_SHADERFORMAT_MSL
+        |SDL_GPU_SHADERFORMAT_DXIL,true,nullptr)};
     if(!device.Get()) {std::cerr<<SDL_GetError()<<'\n';return 1;}
     SdlGpuEffects gpu;
 #else
@@ -132,6 +133,34 @@ int main() {
         std::cout<<"level="<<level<<" separate_ms="<<timings[0]/8<<" batched_ms="<<timings[1]/8<<'\n';
     }
     std::cout<<"Batched styles/bloom/AA and both bloom snapshots: exact\n";
+#if defined(STARFOX_TEST_PORTABLE_GPU)
+    {
+        SDL_GPUTextureCreateInfo info{};
+        info.type=SDL_GPU_TEXTURETYPE_2D;info.format=SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.usage=SDL_GPU_TEXTUREUSAGE_SAMPLER;info.width=frame.stored_width();info.height=frame.stored_height();
+        info.layer_count_or_depth=info.num_levels=1;
+        auto* target=SDL_CreateGPUTexture(device.Get(),&info);
+        if(!target) return 40;
+        // Alternate captured and uncaptured frames, including replacement of
+        // an unread frame. Capture must always return the latest composition.
+        for(unsigned level=0;level<4;++level) {
+            GpuEffectSettings settings;settings.hdr=level;settings.bloom_model=level;
+            auto expected=source,direct=source;
+            if(!gpu.apply(device.Get(),frame,expected,settings)) return 41;
+            // Start direct presentation with no staging allocation. A prior
+            // CPU-readback pass must not be required for the first capture.
+            gpu.release_device();
+            settings.presentation_texture=target;
+            for(unsigned repeat=0;repeat<2;++repeat)
+                if(!gpu.apply(device.Get(),frame,direct,settings) || direct!=source) return 42;
+            if(!gpu.readback(direct) || direct!=expected) return 43;
+            direct.clear();
+            if(!gpu.readback(direct) || direct!=expected) return 44;
+        }
+        SDL_ReleaseGPUTexture(device.Get(),target);
+        std::cout<<"Portable deferred capture: exact, including unread replacement and repeated reads\n";
+    }
+#endif
     {
 #if !defined(STARFOX_TEST_PORTABLE_GPU)
         D3D11_TEXTURE2D_DESC desc{};desc.Width=frame.stored_width();desc.Height=frame.stored_height();

@@ -86,18 +86,21 @@ enum class PregamePage {
     options,
     two_d,
     three_d,
+    cheats,
 };
 
 inline constexpr std::array<std::uint8_t, 12> main_menu_order{
     0,1,2,3,4,5,6,20,21,14,15,16};
 inline constexpr std::array<std::uint8_t, 5> two_d_menu_order{8,18,13,24,23};
-inline constexpr std::array<std::uint8_t, 12> three_d_menu_order{7,11,9,17,19,10,28,26,27,12,22,23};
-inline constexpr std::array<std::uint8_t, 11> options_menu_order{0,1,2,3,4,5,6,7,8,12,11};
+inline constexpr std::array<std::uint8_t, 12> three_d_menu_order{7,11,9,17,19,10,28,29,27,12,22,23};
+inline constexpr std::array<std::uint8_t, 12> options_menu_order{9,0,1,2,3,4,5,6,7,8,12,11};
+inline constexpr std::array<std::uint8_t, 7> cheats_menu_order{0,1,2,3,4,5,6};
 inline std::span<const std::uint8_t> pregame_menu_order(PregamePage page) {
     switch (page) {
     case PregamePage::two_d: return two_d_menu_order;
     case PregamePage::three_d: return three_d_menu_order;
     case PregamePage::options: return options_menu_order;
+    case PregamePage::cheats: return cheats_menu_order;
     default: return main_menu_order;
     }
 }
@@ -130,11 +133,13 @@ enum class TwoDFilterMode : std::uint8_t {
     xbrz,
     sharp_bilinear,
     crt,
+    scalefx,
 };
 
-inline constexpr std::size_t two_d_filter_mode_count = 5U;
+inline constexpr std::size_t two_d_filter_mode_count = 6U;
 
 struct MeterState {
+    [[nodiscard]] bool operator==(const MeterState&) const = default;
     std::uint8_t damage{};
     std::uint8_t boost{};
     bool shield_up{};
@@ -168,6 +173,10 @@ struct WindowWipeState {
     std::uint8_t logic{};
     std::array<std::uint16_t, 192> left{};
     std::array<std::uint16_t, 192> right{};
+    // Presentation-only MSCRAMWIPE band edges, in source scanlines. Do not
+    // interpolate its binary per-row X bounds into temporary vertical slits.
+    bool horizontal_opening{};
+    double opening_top{}, opening_bottom{};
 };
 
 // Fixed-colour effect selected by TRANS.ASM's colour-window priority list.
@@ -196,6 +205,8 @@ struct DialogueState {
     bool alternate_portraits{};
     std::uint8_t portrait_frame{};
     std::uint32_t text_address{};
+    bool meter_visible{};
+    std::uint8_t meter_health{};
 };
 
 struct StageResultsState {
@@ -254,6 +265,14 @@ public:
         bool source_initialize_direct_map = false);
 
     [[nodiscard]] GameTickResult tick(const input::TickInput& input);
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    // Keep sibling object addresses stable: construct a complete replacement
+    // and let the runtime atomically swap its owning pointer after audio loads.
+    [[nodiscard]] std::unique_ptr<GameSimulation> restored_state(
+        std::span<const std::uint8_t> bytes) const;
+    // Commit an already validated replacement without changing this object's
+    // address (the renderer and runtime retain references to it).
+    void swap_state(GameSimulation& other) noexcept;
     void present_frame();
     void start_map(const std::string& symbol);
     void synchronize_apu_output_ports(
@@ -275,6 +294,16 @@ public:
     [[nodiscard]] std::array<std::uint16_t, 16> palette_words() const noexcept;
     [[nodiscard]] GameFlowState flow_state() const noexcept { return flow_state_; }
     [[nodiscard]] bool menu_preview() const noexcept { return menu_preview_; }
+    [[nodiscard]] bool runtime_options_open() const noexcept { return runtime_options_open_; }
+    bool toggle_runtime_options() noexcept {
+        if(runtime_options_open_) {runtime_options_open_=false;menu_preview_=false;video_phases_since_tick_=runtime_options_video_phase_;return true;}
+        if(in_setup_menu()) return false;
+        runtime_options_open_=menu_preview_=true;
+        runtime_options_video_phase_=video_phases_since_tick_;
+        pregame_page_=PregamePage::main;pregame_selection_=14U;
+        pregame_confirmation_blocked_=0;pregame_horizontal_blocked_=false;
+        return true;
+    }
     [[nodiscard]] bool in_setup_menu() const noexcept {
         return menu_preview_ || flow_state_ == GameFlowState::pregame_menu;
     }
@@ -320,6 +349,29 @@ public:
     [[nodiscard]] std::optional<std::uint16_t>
         model_colour_table_override() const noexcept;
     void set_god_mode(bool enabled) noexcept;
+    [[nodiscard]] bool infinite_bombs() const noexcept { return infinite_bombs_; }
+    [[nodiscard]] bool infinite_lives() const noexcept { return infinite_lives_; }
+    void set_infinite_lives(bool value) noexcept { infinite_lives_ = value; }
+    [[nodiscard]] bool infinite_boost() const noexcept { return infinite_boost_; }
+    void set_infinite_bombs(bool value) noexcept { infinite_bombs_ = value; }
+    void set_infinite_boost(bool value) noexcept { infinite_boost_ = value; }
+    [[nodiscard]] std::uint8_t default_laser() const noexcept { return default_laser_; }
+    void set_default_laser(std::uint8_t value) noexcept {
+        default_laser_ = value <= 2U ? value : 0U;
+        default_laser_pending_ = true;
+    }
+    // Stable route/stage code (route * 10 + stage), zero means ordinary boot.
+    [[nodiscard]] std::uint8_t selected_level() const noexcept { return selected_level_; }
+    [[nodiscard]] std::uint8_t stereo_output() const noexcept { return stereo_output_; }
+    void set_stereo_output(std::uint8_t value) noexcept {
+        stereo_output_ = value <= 2U ? value : 0U;
+    }
+    void set_selected_level(std::uint8_t value);
+    [[nodiscard]] std::vector<std::uint8_t> selectable_levels() const;
+    [[nodiscard]] std::string selected_level_name() const;
+    // Shared front-end level-select launch, including route/stage setup.
+    // OFF and an open native options overlay leave gameplay untouched.
+    bool launch_selected_level();
     // Face count per shape id, for the ORIGINAL SPEED pace estimate. The host
     // owns this because it is the side that decodes shapes; the simulation
     // decides pacing before anything is rasterized, so it cannot measure real
@@ -377,8 +429,8 @@ public:
     void set_bloom_2d(std::uint8_t value) noexcept { bloom_2d_ = value < 4U ? value : 0U; }
     [[nodiscard]] std::uint8_t model_smoothing() const noexcept { return model_smoothing_; }
     [[nodiscard]] std::uint8_t language() const noexcept { return language_; }
-    [[nodiscard]] bool enhanced_shadows() const noexcept { return enhanced_shadows_; }
-    void set_enhanced_shadows(bool value) noexcept { enhanced_shadows_ = value; }
+    [[nodiscard]] bool ray_tracing() const noexcept { return ray_tracing_; }
+    void set_ray_tracing(bool value) noexcept { ray_tracing_ = value; }
     [[nodiscard]] std::uint8_t chromatic_aberration() const noexcept { return chromatic_aberration_; }
     void set_chromatic_aberration(std::uint8_t value) noexcept { chromatic_aberration_ = value <= 3 ? value : 0; }
     [[nodiscard]] std::uint8_t hdr_effect() const noexcept { return hdr_effect_; }
@@ -472,6 +524,7 @@ public:
     }
     [[nodiscard]] bool paused() const noexcept { return paused_; }
     [[nodiscard]] MeterState meter_state() const noexcept;
+    [[nodiscard]] MeterState peek_meter_state() const noexcept;
     [[nodiscard]] CircleEffectState circle_effect_state() const noexcept;
     [[nodiscard]] ColourMathEffectState colour_math_effect_state() const noexcept {
         return colour_math_effect_;
@@ -536,6 +589,7 @@ private:
     void enter_pregame_menu();
     void enter_continue_screen();
     void enter_title();
+    void apply_title_logo();
     void enter_ex_pregame_menu(bool model_test = false);
     void enter_intro();
     void update_continue_sprites();
@@ -600,6 +654,8 @@ private:
     void detonate_god_nuke();
 
     const assets::RomImage* rom_{};
+    template<class Archive, class Self>
+    static void transfer_host_state(Archive& archive, Self& self);
     const assets::SymbolMap* symbols_{};
     ObjectPool objects_;
     MapVm map_;
@@ -677,6 +733,8 @@ private:
     std::uint32_t horizontal_offsets_buffer_{};
     std::uint32_t background_scroll_z_{};
     std::uint32_t transferred_background_scroll_z_{};
+    std::uint32_t background3_scroll_flag_{};
+    std::uint32_t background3_scroll_{};
     std::uint32_t do_sounds_{};
     std::uint32_t set_black_{};
     std::uint32_t update_objects_{};
@@ -974,6 +1032,7 @@ private:
     std::uint32_t message_count_1_{};
     std::uint32_t message_count_2_{};
     std::uint32_t which_friend_{};
+    std::uint32_t friends_meter_{};
     std::uint32_t friends_message_2_{};
     std::uint32_t message_count_1_2_{};
     std::uint32_t message_count_2_2_{};
@@ -1041,6 +1100,8 @@ private:
     std::uint16_t presentation_fps_{60U};
     std::uint8_t pregame_selection_{};
     PregamePage pregame_page_{PregamePage::main};
+    bool runtime_options_open_{};
+    std::uint8_t runtime_options_video_phase_{};
     Experience experience_{Experience::original};
     bool god_mode_{};
     bool show_fps_{};
@@ -1056,7 +1117,16 @@ private:
     std::uint8_t bloom_2d_{};
     std::uint8_t model_smoothing_{};
     std::uint8_t language_{};
-    bool enhanced_shadows_{};
+    bool enhanced_shadows_{}; // Reserved archive byte; no longer controls rendering.
+    bool ray_tracing_{};
+    bool infinite_bombs_{};
+    bool infinite_lives_{};
+    bool host_god_mode_override_{};
+    bool infinite_boost_{};
+    std::uint8_t default_laser_{};
+    std::uint8_t selected_level_{};
+    std::uint8_t stereo_output_{};
+    bool default_laser_pending_{true};
     std::uint8_t chromatic_aberration_{};
     std::uint8_t hdr_effect_{};
     std::uint8_t world_effect_intensity_{100U};

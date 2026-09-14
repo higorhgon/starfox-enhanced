@@ -1,6 +1,7 @@
 #include "starfox/assets/rom.hpp"
 #include "starfox/assets/shape_decoder.hpp"
 #include "starfox/render/dust_renderer.hpp"
+#include "starfox/render/grid_projection.hpp"
 #include "starfox/render/shadow_scene.hpp"
 #include "starfox/render/framebuffer.hpp"
 #include "starfox/render/software_renderer.hpp"
@@ -212,6 +213,41 @@ int main() {
         "transient banked-null LoROM read did not behave as open bus");
     const starfox::assets::ShapeDecoder decoder{rom};
     const auto shape = decoder.decode(0x008100, "triangle");
+    {
+        auto bytes=rom.bytes();
+        bytes[offset(0x01810a)]=0x84;
+        bytes[offset(0x01818e)]=64; // BSPEND, unsigned forward branch >127.
+        const starfox::assets::RomImage long_bsp_rom{std::move(bytes)};
+        const starfox::assets::ShapeDecoder long_bsp_decoder{long_bsp_rom};
+        const auto branched=long_bsp_decoder.decode(0x008100);
+        require(branched.bsp_nodes[0].alternate_address==0x01818e,
+            "BSP alternate byte was incorrectly sign extended");
+    }
+    {
+        auto bytes=rom.bytes();
+        // A compact child has no colour table. Poison the historical fallback
+        // and relocate ID_0_C so both standalone and parent-inherited decoding
+        // must choose the correct table before reading colour animations.
+        std::copy_n(bytes.begin()+offset(0x008100),28,bytes.begin()+offset(0x008200));
+        bytes[offset(0x008207)]=255;
+        auto old=std::uint32_t{0x038213};put16(bytes,old,0x8000);
+        auto table=std::uint32_t{0x03a000};
+        for(unsigned i=0;i<32;++i) put16(bytes,table,0x3f11);
+        auto override_table=std::uint32_t{0x03a100};
+        for(unsigned i=0;i<32;++i) put16(bytes,override_table,0x3f22);
+        const starfox::assets::RomImage compact_rom{std::move(bytes)};
+        const auto compact_symbols=starfox::assets::SymbolMap::parse("ID_0_C $03a000\n");
+        const starfox::assets::ShapeDecoder compact_decoder{compact_rom,compact_symbols};
+        const auto standalone=compact_decoder.decode(0x008200);
+        require(standalone.header.compact && standalone.colour_words[0]==0x3f11,
+            "compact preview ignored relocated default material");
+        auto parent=shape.header;parent.colour_pointer=0xa100;parent.shift=3;
+        const auto child=compact_decoder.decode_lod(parent,0x8200);
+        require(child.header.shift==3 && child.colour_words[0]==0x3f22,
+            "compact LOD did not inherit parent material before decoding");
+        const auto overridden=compact_decoder.decode_lod(parent,0x8200,0xa000);
+        require(overridden.colour_words[0]==0x3f11,"LOD material override lost precedence");
+    }
     require(shape.vertices.size() == 3, "point stream did not decode three vertices");
     require(shape.faces.size() == 1, "face stream did not decode one face");
     require(shape.bsp_nodes.size() == 1, "BSP node was not preserved");
@@ -237,6 +273,16 @@ int main() {
     renderer.draw(shape, {}, caster_capture, true, nullptr, &shadow_scene);
     require(shadow_scene.triangle_count() > 0U,
         "renderer did not export actual model faces for shadow occlusion");
+    starfox::render::shadows::Scene collected;
+    renderer.collect_shadow_casters(shape,{},collected);
+    require(collected.triangle_count()==shadow_scene.triangle_count(),
+        "standalone caster collection changed triangle count");
+    for(std::size_t i=0;i<collected.triangle_count();++i) {
+        const auto& a=collected.triangles()[i];const auto& b=shadow_scene.triangles()[i];
+        const auto same=[](auto x,auto y){return x.x==y.x && x.y==y.y && x.z==y.z;};
+        require(same(a.a,b.a) && same(a.b,b.b) && same(a.c,b.c),
+            "standalone caster collection changed triangle vertices/order");
+    }
     require(caster_capture.pixels() == framebuffer.pixels(),
         "shadow geometry collection changed the original raster");
     std::size_t coloured_pixels = 0;
@@ -660,6 +706,19 @@ int main() {
         0, 0, 32'767,
     };
     starfox::simulation::DustSystem viewport_dust;
+    {
+        starfox::render::DustRenderer::DustFrame wrapped;
+        wrapped.points={{-32768,32767,0}};
+        wrapped.camera.x=32767.5;wrapped.camera.y=-32768.25;wrapped.camera.z=65536.5;
+        const auto packed=starfox::render::DustRenderer::pack_dust_points(wrapped);
+        require(packed.size()==1 && packed[0]==std::array<double,4>{.5,-.75,-.5,0},
+            "dust input packing changed fractional word wrapping");
+        wrapped.camera.x=std::numeric_limits<double>::infinity();
+        bool rejected=false;
+        try { (void)starfox::render::DustRenderer::pack_dust_points(wrapped); }
+        catch(const std::invalid_argument&) {rejected=true;}
+        require(rejected,"dust packing accepted a non-finite camera");
+    }
     viewport_dust.tick({0, 0, 0}, identity_matrix, true);
     starfox::render::Framebuffer centered_dust{224, 192};
     dust_renderer.draw(viewport_dust, 120U, grid_camera, identity_matrix,
@@ -673,6 +732,17 @@ int main() {
         const auto offset_x = 64 + ui_offset - static_cast<int>(width / 2U);
         dust_renderer.draw(viewport_dust, 120U, grid_camera, identity_matrix,
             viewport_frame, offset_x, -48);
+        auto snapshot=dust_renderer.prepare_dust(viewport_dust,120,grid_camera,identity_matrix);
+        snapshot.offset_x=offset_x;snapshot.offset_y=-48;
+        starfox::render::Framebuffer replayed_dust{width,192};
+        starfox::render::DustRenderer::draw_dust_frame(snapshot,replayed_dust);
+        require(replayed_dust.pixels()==viewport_frame.pixels(),"owned dust snapshot changed viewport pixels");
+        auto recycled=viewport_dust;
+        const auto retained=dust_renderer.prepare_dust(recycled,120,grid_camera,identity_matrix);
+        const auto original_points=retained.points;
+        recycled.tick({5000,5000,5000},identity_matrix,true);
+        require(retained.points==original_points,
+            "dust snapshot did not retain source points");
         // Compare the shared visible interior, avoiding clipping at either
         // framebuffer edge. Controls use native (64,48), not (112,96).
         for (int y = 2; y < 142; ++y) {
@@ -684,6 +754,19 @@ int main() {
         }
     }
     starfox::render::Framebuffer grid_points{224, 192};
+    for(unsigned width:{224U,400U,796U}) for(double x:{-32768.,0.,32767.}) {
+        auto probe=grid_camera;probe.x=x;
+        starfox::render::Framebuffer expected{width,192},projected_pixels{width,192};
+        dust_renderer.draw_grid(probe,identity_matrix,expected);
+        const auto projected=starfox::render::project_source_grid(probe,identity_matrix,width,192);
+        require(projected.count<=225,"Projected source grid exceeded lattice capacity");
+        for(std::size_t i=0;i<projected.count;++i) {
+            const auto& point=projected.points[i];
+            projected_pixels.set(point.x,point.y,126);
+            if(point.depth<512) projected_pixels.set(point.x-1,point.y+1,126);
+        }
+        require(expected.pixels()==projected_pixels.pixels(),"Reusable grid projection differs from independent dot renderer");
+    }
     dust_renderer.draw_grid(grid_camera, identity_matrix, grid_points);
     starfox::render::Framebuffer grid_lines{224, 192};
     dust_renderer.draw_grid_lines(
@@ -698,6 +781,16 @@ int main() {
         grid_camera, identity_matrix, 17U, repeated_grid_lines);
     require(repeated_grid_lines.pixels() == grid_lines.pixels(),
             "EX GRID LINES changed during repeated high-FPS presentations");
+    const auto grid_snapshot=dust_renderer.prepare_grid_lines(grid_camera,identity_matrix,17,224,192);
+    auto shifted_grid_camera=grid_camera;shifted_grid_camera.x+=37;
+    const auto shifted_snapshot=dust_renderer.prepare_grid_lines(shifted_grid_camera,identity_matrix,17,224,192);
+    require(shifted_snapshot.start==grid_snapshot.start,
+            "interpolated grid presentation changed source-frame start");
+    require(grid_snapshot.projected.count>0,"grid history fixture has no endpoint");
+    const auto last_grid_point=grid_snapshot.projected.points[grid_snapshot.projected.count-1];
+    const auto next_snapshot=dust_renderer.prepare_grid_lines(grid_camera,identity_matrix,18,224,192);
+    require(next_snapshot.start==std::array<std::int16_t,2>{static_cast<std::int16_t>(last_grid_point.x-1),last_grid_point.y},
+            "grid history advanced on a repeated presentation instead of the source frame");
     starfox::render::Framebuffer alternate_frame{224, 192};
     starfox::render::RenderPose alternate_pose;
     alternate_pose.colour_frame = 1;

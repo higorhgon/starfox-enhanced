@@ -1,4 +1,5 @@
 #include "starfox/simulation/particle_system.hpp"
+#include "starfox/state/archive.hpp"
 
 #include "starfox/simulation/math.hpp"
 
@@ -15,6 +16,14 @@ constexpr std::uint8_t kObjectAlive = 0x01U;
 constexpr std::uint8_t kGravity = 0x02U;
 constexpr std::uint8_t kFriction = 0x08U;
 constexpr std::uint8_t kFadeOut = 0x10U;
+
+template<class Archive,class Particle>
+void transfer_particle(Archive& archive,Particle& particle) {
+    archive(particle.life,particle.flags,particle.colour,
+        particle.velocity_x,particle.velocity_y,particle.velocity_z,
+        particle.x,particle.y,particle.z,
+        particle.previous_x,particle.previous_y,particle.previous_z,particle.owner);
+}
 
 std::uint32_t rom_symbol(
     const assets::SymbolMap& symbols, const std::string& name) {
@@ -58,6 +67,29 @@ ParticleSystem::ParticleSystem(
 void ParticleSystem::reset() noexcept {
     particles_.fill({});
     random_ = 0x1234U;
+}
+
+std::vector<std::uint8_t> ParticleSystem::save_state() const {
+    state::Writer archive;
+    archive(std::uint32_t{1},fade_table_,circle_table_,random_);
+    for (const auto& particle:particles_) transfer_particle(archive,particle);
+    return archive.bytes();
+}
+
+void ParticleSystem::load_state(std::span<const std::uint8_t> bytes) {
+    auto restored=*this;
+    state::Reader archive{bytes};
+    std::uint32_t version{},fade{},circle{};
+    archive(version,fade,circle,restored.random_);
+    if (version!=1U || fade!=fade_table_ || circle!=circle_table_)
+        throw std::runtime_error{"incompatible particle state"};
+    for (auto& particle:restored.particles_) {
+        transfer_particle(archive,particle);
+        if (particle.owner>kMaximumObjects)
+            throw std::runtime_error{"invalid particle owner in save state"};
+    }
+    archive.finish();
+    *this=std::move(restored);
 }
 
 std::size_t ParticleSystem::active_count() const noexcept {

@@ -203,9 +203,23 @@ private:
     std::uint32_t maximum_y_{};
 };
 
+// Optional diagnostic capture; never changes rasterization or production output.
+struct PolygonRenderDiagnostics {
+    std::vector<std::array<double,3>> camera;
+    std::vector<std::array<double,2>> projected;
+    double signed_area{};
+};
+struct RenderDiagnostics {
+    std::array<std::array<double,3>,2> camera{};
+    std::array<std::array<double,2>,2> projected{},clipped{};
+    bool visible{};
+    std::vector<PolygonRenderDiagnostics> polygons;
+};
+
 class SoftwareRenderer {
 public:
     explicit SoftwareRenderer(RenderSettings settings = {});
+    void collect_shadow_casters(const assets::Shape&,const RenderPose&,shadows::Scene&) const;
 
     void draw(
         const assets::Shape& shape,
@@ -213,7 +227,8 @@ public:
         Framebuffer& target,
         bool clear_target = true,
         SurfaceBuffer* surfaces = nullptr,
-        shadows::Scene* shadow_scene = nullptr) const;
+        shadows::Scene* shadow_scene = nullptr,
+        RenderDiagnostics* axis_diagnostics = nullptr) const;
 
     // MHUD.MC's first-person direction indicators are a Super FX line pass,
     // separate from both the 3D object list and the SNES OAM reticle.
@@ -227,6 +242,8 @@ public:
         std::uint8_t normal_colour_override = 0U) const;
 
 private:
+    void draw_impl(const assets::Shape&,const RenderPose&,Framebuffer&,bool,
+        SurfaceBuffer*,shadows::Scene*,RenderDiagnostics*,bool shadow_only) const;
     RenderSettings settings_;
 };
 

@@ -4,6 +4,7 @@
 #include "starfox/render/palette.hpp"
 
 #include "starfox/render/row_workers.hpp"
+#include "starfox/render/scalefx.hpp"
 
 #include <cstdint>
 #include <span>
@@ -33,9 +34,10 @@ enum class TwoDFilter : std::uint8_t {
     xbrz = 2,
     sharp_bilinear = 3,
     crt = 4,
+    scalefx = 5,
 };
 
-inline constexpr std::size_t two_d_filter_count = 5U;
+inline constexpr std::size_t two_d_filter_count = 6U;
 
 [[nodiscard]] std::string_view two_d_filter_name(TwoDFilter filter) noexcept;
 // False when the backend was not compiled in; the caller may still select it,
@@ -46,6 +48,7 @@ inline constexpr std::size_t two_d_filter_count = 5U;
 // the window so no filtered frame allocates. Threads live in RowWorkers, which
 // the presentation passes share.
 struct PixelFilterScratch {
+    ScaleFxScratch scalefx;
     std::vector<std::uint32_t> source;   // source raster, packed ARGB
     std::vector<std::uint32_t> filtered; // filter output, packed ARGB
 };

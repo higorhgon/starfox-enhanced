@@ -9,6 +9,8 @@ ByteAddressBuffer layerTags : register(t6, space0);
 ByteAddressBuffer indexedPixels : register(t7, space0);
 ByteAddressBuffer surfaces : register(t8, space0);
 ByteAddressBuffer shadowMask : register(t9, space0);
+StructuredBuffer<float4> scalefxPixels : register(t10, space0);
+ByteAddressBuffer setupPixels : register(t11, space0);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> outputImage : register(u0, space1);
 [[vk::image_format("rgba32f")]] RWTexture2D<float4> bloomOutput : register(u1, space1);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> filterOutput : register(u2, space1);
@@ -40,10 +42,26 @@ cbuffer Settings : register(b0) {
     uint bloomModel,bloomWorld,bloomWidth,bloomHeight;
     uint filter,highlightFilter,overlayFilter,pad3;
     uint shadowWidth,shadowHeight; int shadowY; uint shadowEnabled;
+    uint4 windowRows[48];
 };
+void touchBox(inout uint3 rgb,int2 at,int4 bounds,uint3 edgeColour) {
+    if(at.x<bounds.x || at.y<bounds.y || at.x>bounds.z || at.y>bounds.w) return;
+    bool edge=at.x==bounds.x || at.y==bounds.y || at.x==bounds.z || at.y==bounds.w;
+    uint alpha=edge?170:76;
+    uint3 colour=edge?edgeColour:uint3(18,28,42);
+    rgb=(rgb*(255-alpha)+colour*alpha+127)/255;
+}
 uint indexOf(uint2 p) { return p.y*width+p.x; }
+bool hostInk(int2 p) {
+    if(any(p<0) || p.x>=int(surfaceWidth) || p.y>=int(surfaceHeight)) return false;
+    uint i=uint(p.y)*surfaceWidth+uint(p.x);
+    if(i>=6144) return false;
+    uint word=i/32;
+    return (windowRows[word/4][word%4]&(1u<<(i%32)))!=0;
+}
 uint tag(uint2 p) {
     uint i=indexOf(p);
+    if(reserved==1) return (layerTags.Load(i*4)>>8)&255u;
     return (layerTags.Load(i & ~3u) >> ((i & 3u)*8)) & 255u;
 }
 bool model(uint2 p) { uint t=tag(p); return t==0 || t==4; }
@@ -57,6 +75,11 @@ bool surfaceAt(int2 p,out float4 sample) {
     sample=0;
     int2 local=p-int2(surfaceX,surfaceY);
     if(any(p<0) || any(p>=int2(width,height)) || any(local<0) || any(local>=int2(surfaceWidth,surfaceHeight))) return false;
+    if(reserved==1) {
+        uint packed=indexedPixels.Load(indexOf(p)*4);
+        if(!(packed & 0x01000000u) || ((packed>>16)&255u)!=(packed&255u)) return false;
+        sample=asfloat(surfaces.Load4((local.y*surfaceWidth+local.x)*16));return true;
+    }
     uint base=(local.y*surfaceWidth+local.x)*20;
     uint flags=surfaces.Load(base+16), i=indexOf(p);
     uint palette=(indexedPixels.Load(i & ~3u)>>((i & 3u)*8)) & 255u;
@@ -72,6 +95,13 @@ uint4 sourceCell(int2 p) {
 #endif
 #include "edge_corners.hlsli"
 uint4 filterSample(uint2 p,uint factor) {
+#if defined(STARFOX_SDL_GPU)
+    if(filter==5) {
+        uint2 extent=uint2(width,height)/scale*3;
+        p=min(p,extent-1);
+        return uint4(scalefxPixels[p.y*extent.x+p.x]*255+.5);
+    }
+#endif
 #if STARFOX_ENABLE_XBRZ
     if(filter==2) return xbrzSample(p,factor);
 #endif
@@ -101,6 +131,16 @@ uint4 filterSample(uint2 p,uint factor) {
 [numthreads(8,8,1)]
 void main(uint3 id : SV_DispatchThreadID) {
     uint2 p=id.xy;
+#if defined(STARFOX_SDL_GPU)
+    if(stage==28) {
+        if(p.x>=width/scale || p.y>=height/scale) return;
+        uint i=uint(pad0)+p.y*(width/scale)+p.x;
+        uint index=(setupPixels.Load(i&~3u)>>((i&3u)*8))&255;
+        uint packed=index!=0 && index<lighting?setupPixels.Load(uint(pad1)+index*4):0;
+        if(filter!=0 && index!=0 && index<lighting) packed|=0xff000000u;
+        filterOutput[p]=float4(packed&255,(packed>>8)&255,(packed>>16)&255,packed>>24)/255.;return;
+    }
+#endif
     if(stage==13) {
         if(p.x>=width/scale || p.y>=height/scale) return;
         uint2 base=p*scale;
@@ -143,7 +183,138 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     if(p.x>=width || p.y>=height) return;
     uint4 c=colour(p), result=c;
-    if(stage==17) {
+    if(stage==29) {
+#if defined(STARFOX_SDL_GPU)
+        uint4 ink=uint4((filter!=0?bloomInput.Load(int3(p,0)):filterSource.Load(int3(p/scale,0)))*255+.5);
+        uint i=uint(pad0)+(p.y/scale)*(width/scale)+p.x/scale;
+        uint index=(setupPixels.Load(i&~3u)>>((i&3u)*8))&255;
+        bool visible=filter!=0?ink.a!=0:index!=0 && index<lighting;
+        if(visible) {
+            int3 five=max(int3(0,0,0),int3((ink.rgb*31+127)/255)-int(hdr));
+            uint3 rgb=uint3((five<<3)|(five>>2));
+            if(filter!=0) result.rgb=(rgb*ink.a+c.rgb*(255-ink.a)+127)/255;
+            else result=uint4(rgb,ink.a);
+        }
+#endif
+    } else if(stage==27) {
+        int2 at=int2(p/scale);
+        bool inside=at.x>=minimumX && at.x<=maximumX && at.y>=minimumY && at.y<=maximumY;
+        if((pad0&1)!=0 && !inside) {
+            int3 five=max(int3(0,0,0),int3((result.rgb*31+127)/255)-int(hdr));
+            result.rgb=uint3((five<<3)|(five>>2));
+        }
+        if((pad0&2)!=0) {
+            int3 five=max(int3(0,0,0),int3((result.rgb*31+127)/255)-int(chromatic));
+            result.rgb=uint3((five<<3)|(five>>2));
+        }
+    } else if(stage==26) {
+        int2 at=int2(p/scale);int w=int(width/scale),h=int(height/scale);
+        int dx=w*20/100,dy=h*73/100,u=max(7,h/28);
+        uint3 rgb=result.rgb;
+        touchBox(rgb,at,int4(dx-u,dy-u*3,dx+u,dy-u),uint3(235,245,255));
+        touchBox(rgb,at,int4(dx-u,dy+u,dx+u,dy+u*3),uint3(235,245,255));
+        touchBox(rgb,at,int4(dx-u*3,dy-u,dx-u,dy+u),uint3(235,245,255));
+        touchBox(rgb,at,int4(dx+u,dy-u,dx+u*3,dy+u),uint3(235,245,255));
+        touchBox(rgb,at,int4(dx-u,dy-u,dx+u,dy+u),uint3(150,180,210));
+        int2 centre=int2(w*89/100,h*69/100);
+        touchBox(rgb,at,int4(centre-u,centre+u),uint3(100,235,120));
+        centre=int2(w*77/100,h*81/100);
+        touchBox(rgb,at,int4(centre-u,centre+u),uint3(245,105,105));
+        centre=int2(w*77/100,h*57/100);
+        touchBox(rgb,at,int4(centre-u,centre+u),uint3(100,155,255));
+        centre=int2(w*65/100,h*69/100);
+        touchBox(rgb,at,int4(centre-u,centre+u),uint3(250,220,95));
+        touchBox(rgb,at,int4(7,7,w*30/100,20),uint3(205,215,230));
+        touchBox(rgb,at,int4(w*70/100,7,w-8,20),uint3(205,215,230));
+        touchBox(rgb,at,int4(w*36/100,h-20,w*47/100,h-7),uint3(205,215,230));
+        touchBox(rgb,at,int4(w*53/100,h-20,w*64/100,h-7),uint3(205,215,230));
+        result.rgb=rgb;
+    } else if(stage==25) {
+#if defined(STARFOX_SDL_GPU)
+        uint2 at=p/scale;
+        int localX=int(at.x)-int((width/scale-256u)/2u);
+        if(localX>=minimumX && localX<=maximumX && at.y>=20 && at.y<=222) result.rgb/=4;
+        if(at.x<surfaceWidth && at.y<surfaceHeight) {
+            uint i=at.y*surfaceWidth+at.x;
+            uint ink=(setupPixels.Load(i&~3u)>>((i&3u)*8))&255;
+            if(ink!=0) {
+                uint c=ink&15;
+                uint3 rgb=c==14?uint3(255,255,255):c==10?uint3(255,220,64):uint3(180,200,215);
+                result.rgb=rgb*uint(pad0)/15;
+            }
+        }
+#endif
+    } else if(stage==24) {
+        int2 at=int2(p/scale)-int2(surfaceX,surfaceY);
+        if(hostInk(at)) result=uint4(255,255,255,255);
+        else if(at.x>=-6 && at.x<int(surfaceWidth)+6 && at.y>=-4 && at.y<int(surfaceHeight)+4) {
+            bool border=at.x==-6 || at.x==int(surfaceWidth)+5 || at.y==-4 || at.y==int(surfaceHeight)+3;
+            result=uint4(border?255:0,border?255:0,border?255:0,255);
+        }
+    } else if(stage==23) {
+        int2 at=int2(p/scale)-int2(surfaceX,surfaceY);
+        if(hostInk(at)) result=uint4(255,255,255,255);
+        else if(hostInk(at-int2(1,1))) result=uint4(0,0,0,255);
+    } else if(stage==22) {
+        int2 logical=int2(p/scale);
+        int w=int(width/scale),h=int(height/scale);
+        bool expandedY=(pad1&2)!=0;
+        int row=expandedY ? clamp(logical.y*191/max(h-1,1),0,191) : logical.y-surfaceY;
+        if(row>=0 && row<192) {
+            uint packed=windowRows[uint(row)/4][uint(row)%4];
+            int left=int(packed&255),right=int((packed>>8)&255);
+            int sx=(pad1&1)!=0 ? 16+clamp(logical.x*223/max(w-1,1),0,223) : logical.x-surfaceX;
+            bool inside=left<=right ? sx>=left && sx<=right : sx>=left || sx<=right;
+            bool a=!inside,b=sx>=16 && sx<=240;
+            bool masked=pad0==1 ? a&&b : pad0==2 ? a!=b : pad0==3 ? a==b : a||b;
+            if(masked) result=uint4(0,0,0,255);
+        }
+    } else if(stage==21) {
+        uint i=indexOf(p);
+        uint palette=reserved==1 ? indexedPixels.Load(i*4)&255u
+            : (indexedPixels.Load(i&~3u)>>((i&3u)*8))&255u;
+        if(palette<128 || (pad1&4)!=0) {
+            int3 fixed=int3(hdr,chromatic,smoothing);
+            int3 v=(pad1&1)!=0 ? int3(c.rgb)-fixed : int3(c.rgb)+fixed;
+            if((pad1&2)!=0) v/=2;
+            result.rgb=uint3(clamp(v,0,255));
+        }
+    } else if(stage==20) {
+        uint2 anchor=(p/scale)*scale;
+        uint i=indexOf(anchor);
+        uint packed=reserved==1 ? indexedPixels.Load(i*4)
+            : (indexedPixels.Load(i&~3u)>>((i&3u)*8))&255u;
+        if((packed&255u)<128 && (pad1==0 || !(packed&0x02000000u))) {
+            int3 v=max(int3((c.rgb*31u+127u)/255u)-pad0,0);
+            result.rgb=uint3((v<<3)|(v>>2));
+        }
+    } else if(stage==19) {
+        int2 delta=int2(p)-int2(surfaceX,surfaceY);
+        uint i=indexOf(p);
+        uint palette=reserved==1 ? indexedPixels.Load(i*4)&255u
+            : (indexedPixels.Load(i&~3u)>>((i&3u)*8))&255u;
+        if(int(p.x)>=minimumX && int(p.x)<maximumX
+            && int(p.y)>=minimumY && int(p.y)<maximumY
+            && delta.x*delta.x+delta.y*delta.y<=pad0*pad0
+            && (palette<128 || (pad1&4)!=0)) {
+            int3 main=int3((c.rgb*31u+127u)/255u);
+            int3 fixed=int3(hdr,chromatic,smoothing);
+            int3 v=(pad1&1)!=0 ? main-fixed : main+fixed;
+            if((pad1&2)!=0) v/=2;
+            v=clamp(v,0,31);
+            result.rgb=uint3((v<<3)|(v>>2));
+        }
+    } else if(stage==18) {
+        // The CPU converts interpolated double-precision Y edges to exact
+        // stored-pixel bounds; no GPU float rounding can shift a shutter row.
+        if(int(p.y)>=surfaceX && int(p.y)<surfaceY) {
+            bool closed=int(p.y)<minimumX || int(p.y)>=minimumY;
+            int sx=int(p.x/scale)-maximumY;
+            bool guard=pad0!=0 ? int(p.x)<maximumX
+                : ((!(sx>=15 && sx<=16))!=(sx>=16 && sx<=240));
+            if(closed || guard) result=uint4(0,0,0,255);
+        }
+    } else if(stage==17) {
         float4 sample;
         bool owns=surfaceAt(int2(p),sample);
         splitOutput[p]=owns?float4(c.rgb,255)/255.:float4(0,0,0,0);
@@ -167,12 +338,13 @@ void main(uint3 id : SV_DispatchThreadID) {
         int sy=int(p.y)-shadowY;
         uint layer=tag(p);
         if(p.x<shadowWidth && sy>=0 && sy<int(shadowHeight) && (layer==0 || layer==2 || layer==4)) {
-            uint i=uint(sy)*shadowWidth+p.x;
-            uint shade=(shadowMask.Load(i&~3u)>>((i&3u)*8))&255u;
+            uint i=uint(sy)*(shadowEnabled==3?((shadowWidth+3u)&~3u):shadowWidth)+p.x;
+            uint shade=shadowEnabled==2 ? shadowMask.Load(i*4)
+                : (shadowMask.Load(i&~3u)>>((i&3u)*8))&255u;
             result.rgb=c.rgb*(255-shade)/255;
         }
     } else if(stage==14 && (overlayFilter || art(p))) {
-        uint factor=filter==2?clamp(scale,2u,6u):max(scale,2u);uint4 v;
+        uint factor=filter==5?3:filter==2?clamp(scale,2u,6u):max(scale,2u);uint4 v;
         if(scale!=1) v=filterSample(p*factor/scale,factor);
         else {
             uint3 sum=0;uint alpha=0;

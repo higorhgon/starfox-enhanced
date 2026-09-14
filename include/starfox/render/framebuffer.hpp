@@ -6,6 +6,7 @@
 #include <limits>
 #include <span>
 #include <vector>
+#include "starfox/render/raster_commands.hpp"
 
 namespace starfox::render {
 
@@ -54,6 +55,17 @@ public:
     }
     [[nodiscard]] std::uint32_t draw_scale() const noexcept {
         return draw_scale_;
+    }
+    void record_to(RasterCommands* commands) noexcept {commands_=commands;}
+    [[nodiscard]] RasterCommands* command_buffer() const noexcept {return commands_;}
+    void begin_write_coverage() {coverage_.assign(pixels_.size(),0);track_coverage_=true;}
+    void end_write_coverage() noexcept {track_coverage_=false;}
+    [[nodiscard]] bool tracks_write_coverage() const noexcept {return track_coverage_;}
+    [[nodiscard]] std::span<const std::uint8_t> write_coverage() const noexcept {return coverage_;}
+    // Bulk pixel writers must mark coverage too; colour comparison cannot
+    // detect black or same-colour foreground writes.
+    void mark_written(std::size_t first,std::size_t count=1) noexcept {
+        if(track_coverage_) std::fill_n(coverage_.begin()+first,count,std::uint8_t{1});
     }
     // Repartitions the same storage between source-raster and stored extents.
     void set_draw_scale(std::uint32_t draw_scale) noexcept {
@@ -110,6 +122,7 @@ public:
         stored_height_ = stored_height;
         pixels_.assign(
             static_cast<std::size_t>(stored_width_) * stored_height_, 0U);
+        if(track_coverage_) coverage_.assign(pixels_.size(),1);
         if (layer_tags_enabled_) {
             tags_.assign(pixels_.size(),
                 static_cast<std::uint8_t>(PixelLayer::three_d));
@@ -118,6 +131,7 @@ public:
 
     void clear(std::uint8_t colour = 0) noexcept {
         std::fill(pixels_.begin(), pixels_.end(), colour);
+        mark_written(0,pixels_.size());
         if (layer_tags_enabled_) {
             std::fill(tags_.begin(), tags_.end(),
                 static_cast<std::uint8_t>(PixelLayer::three_d));
@@ -129,7 +143,15 @@ public:
             || y >= static_cast<std::int32_t>(height())) {
             return;
         }
+        if(commands_) {
+            RasterCommand command;
+            command.left=x*int(draw_scale_);command.top=y*int(draw_scale_);
+            command.right=command.left+int(draw_scale_);command.bottom=command.top+int(draw_scale_);
+            command.even=command.odd=colour;command.tag=write_tag(PixelLayer::two_d);
+            commands_->add(command);return;
+        }
         if (draw_scale_ == 1U) {
+            mark_written(static_cast<std::size_t>(y)*stored_width_+x);
             pixels_[static_cast<std::size_t>(y) * stored_width_
                 + static_cast<std::size_t>(x)] = colour;
             if (layer_tags_enabled_) {
@@ -147,6 +169,7 @@ public:
                 static_cast<std::size_t>(origin_y + row) * stored_width_
                 + origin_x);
             const auto begin = pixels_.begin() + offset;
+            mark_written(static_cast<std::size_t>(offset),draw_scale_);
             std::fill(begin, begin + draw_scale_, colour);
             if (layer_tags_enabled_) {
                 const auto tag_begin = tags_.begin() + offset;
@@ -168,7 +191,14 @@ public:
     void set_stored(std::uint32_t x, std::uint32_t y, std::uint8_t colour,
         PixelLayer layer = PixelLayer::three_d) noexcept {
         if (x >= stored_width_ || y >= stored_height_) return;
+        if(commands_) {
+            RasterCommand command;
+            command.left=int(x);command.top=int(y);command.right=int(x)+1;command.bottom=int(y)+1;
+            command.even=command.odd=colour;command.tag=write_tag(layer);
+            commands_->add(command);return;
+        }
         pixels_[static_cast<std::size_t>(y) * stored_width_ + x] = colour;
+        mark_written(static_cast<std::size_t>(y)*stored_width_+x);
         if (layer_tags_enabled_) {
             tags_[static_cast<std::size_t>(y) * stored_width_ + x] =
                 write_tag(layer);
@@ -180,6 +210,7 @@ public:
     // a restored frame filters exactly like the frame it was captured from.
     void copy_pixels_from(const Framebuffer& source) {
         pixels_ = source.pixels_;
+        if(track_coverage_) coverage_.assign(pixels_.size(),1);
         if (!layer_tags_enabled_) return;
         if (source.layer_tags_enabled_ && source.tags_.size() == pixels_.size()) {
             tags_ = source.tags_;
@@ -208,6 +239,9 @@ private:
     std::vector<std::uint8_t> tags_;
     bool layer_tags_enabled_{false};
     std::int8_t layer_override_{-1};
+    RasterCommands* commands_{};
+    std::vector<std::uint8_t> coverage_;
+    bool track_coverage_{};
 };
 
 // Reclassifies every write made during its lifetime. World-space effects that

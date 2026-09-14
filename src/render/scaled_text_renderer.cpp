@@ -14,6 +14,11 @@
 namespace starfox::render {
 namespace {
 struct MenuLatinGlyph { char32_t base; char32_t accent; };
+void draw_host_colon(int x,int y,Framebuffer& target,uint8_t ink,bool compact=false) {
+    for(const int top:{compact?2:3,compact?5:8})
+        for(int row=0;row<2;++row) for(int column=1;column<=2;++column)
+            target.set(x+column,y+top+row,ink);
+}
 MenuLatinGlyph menu_latin_glyph(char32_t code) {
     constexpr std::u32string_view accented = U"\u00c0\u00c1\u00c2\u00c3\u00c4\u00c5\u00c7\u00c8\u00c9\u00ca\u00cb\u00cc\u00cd\u00ce\u00cf\u00d1\u00d2\u00d3\u00d4\u00d5\u00d6\u00d9\u00da\u00db\u00dc\u00dd\u00e0\u00e1\u00e2\u00e3\u00e4\u00e5\u00e7\u00e8\u00e9\u00ea\u00eb\u00ec\u00ed\u00ee\u00ef\u00f1\u00f2\u00f3\u00f4\u00f5\u00f6\u00f9\u00fa\u00fb\u00fc\u00fd\u00ff";
     constexpr std::u32string_view bases = U"AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyy";
@@ -28,7 +33,7 @@ MenuLatinGlyph menu_latin_glyph(char32_t code) {
 std::int32_t ScaledTextRenderer::menu_glyph_advance(char32_t code) const {
     const auto latin = menu_latin_glyph(code);
     if (latin.base >= 32 && latin.base < 127) {
-        if (latin.base == U' ' || latin.base == U'/') return 5;
+        if (latin.base == U' ' || latin.base == U'/' || latin.base == U':') return 5;
         const auto index = rom_->read8(game_font_translation_ + latin.base - 32U);
         return rom_->read8(game_font_widths_ + index);
     }
@@ -60,6 +65,8 @@ void ScaledTextRenderer::draw_unicode(std::u32string_view text,
             const auto ink = static_cast<std::uint8_t>(colour_index_base + colour);
             if (latin.base == U'/') {
                 for (int row = 0; row < 12; ++row) target.set(x + 3 - row / 3, y + row, ink);
+            } else if (latin.base == U':') {
+                draw_host_colon(x,y,target,ink);
             } else if (latin.base != U' ') {
                 const auto index = rom_->read8(game_font_translation_ + latin.base - 32U);
                 for (int row = 0; row < 12; ++row) {
@@ -160,21 +167,37 @@ void ScaledTextRenderer::draw(
     const RenderPose& pose,
     Framebuffer& target,
     std::uint8_t colour_index_base) const {
+    draw_projected(prepare_projected(message_pointer,colour,size_adjustment,pose,colour_index_base),target);
+}
+
+ScaledTextRenderer::ProjectedFrame ScaledTextRenderer::prepare_projected(
+    std::uint16_t message_pointer,std::uint8_t colour,std::int8_t size_adjustment,
+    const RenderPose& pose,std::uint8_t colour_index_base) const {
+    ProjectedFrame frame;
+    frame.pose=pose;frame.character_size=127+static_cast<int>(size_adjustment);
+    frame.colour=static_cast<std::uint8_t>(colour_index_base+colour);
     // A text object may remain in the object list for one update before its
     // message pointer is assigned (Star Fox EX does this during its intro).
     // The Super FX sees the lower half of a LoROM bank as non-ROM/open bus;
     // it is not a valid projected-message string.  Treat that transient state
     // as invisible instead of asking RomImage to translate e.g. $2d:0000.
-    if (pose.z < 128.0 || message_pointer < 0x8000U) return;
+    if (pose.z < 128.0 || message_pointer < 0x8000U) return frame;
     const auto message_address = (messages_ & 0xff0000U) | message_pointer;
-    std::vector<std::uint8_t> characters;
-    characters.reserve(32U);
+    frame.glyphs.reserve(32U);
     for (std::uint32_t index = 0; index < 256U; ++index) {
         const auto character = rom_->read8(message_address + index);
         if (character == 0U) break;
-        characters.push_back(character);
+        std::array<std::uint16_t,16> rows{};
+        if(character<=41U) for(unsigned row=0;row<16;++row)
+            rows[row]=rom_->read16(font_+std::uint32_t(character-1U)*32U+row*2U);
+        frame.glyphs.push_back(rows);
     }
-    if (characters.empty()) return;
+    return frame;
+}
+
+void ScaledTextRenderer::draw_projected(const ProjectedFrame& frame,Framebuffer& target) {
+    if(frame.glyphs.empty() || frame.pose.z<128.) return;
+    const auto& pose=frame.pose;
 
     // Project directly into the stored raster at enhanced resolutions. Doing
     // the projection at logical resolution first discarded subpixel movement
@@ -187,7 +210,7 @@ void ScaledTextRenderer::draw(
     } restore{target, raster_scale};
     target.set_draw_scale(1U);
     const double focal_length = 256.0 * raster_scale;
-    const auto world_character_size = 127 + static_cast<int>(size_adjustment);
+    const auto world_character_size = frame.character_size;
     if (world_character_size <= 0) return;
     const auto dimension = static_cast<int>(std::trunc(
         world_character_size * focal_length / pose.z));
@@ -196,19 +219,16 @@ void ScaledTextRenderer::draw(
         std::trunc(pose.x * focal_length / pose.z));
     const auto centre_y = static_cast<int>(target.height() / 2U) + static_cast<int>(
         std::trunc(pose.y * focal_length / pose.z));
-    const auto string_width = dimension * static_cast<int>(characters.size());
+    const auto string_width = dimension * static_cast<int>(frame.glyphs.size());
     const auto left = centre_x - string_width / 2;
     const auto top = centre_y - dimension / 2;
-    const auto output_colour = static_cast<std::uint8_t>(colour_index_base + colour);
+    const auto output_colour = frame.colour;
 
     for (std::size_t character_index = 0;
-         character_index < characters.size(); ++character_index) {
-        const auto token = characters[character_index];
-        if (token == 0U || token > 41U) continue;
-        const auto glyph = font_ + static_cast<std::uint32_t>(token - 1U) * 32U;
+         character_index < frame.glyphs.size(); ++character_index) {
         for (auto y = 0; y < dimension; ++y) {
             const auto source_y = std::min(15, y * 16 / dimension);
-            const auto row = rom_->read16(glyph + static_cast<std::uint32_t>(source_y * 2));
+            const auto row = frame.glyphs[character_index][source_y];
             for (auto x = 0; x < dimension; ++x) {
                 const auto source_x = std::min(15, x * 16 / dimension);
                 if ((row & (0x8000U >> source_x)) == 0U) continue;
@@ -359,7 +379,8 @@ void ScaledTextRenderer::draw_face(
     std::int32_t y,
     Framebuffer& target,
     std::uint8_t colour_index_base,
-    bool alternate_portraits) const {
+    bool alternate_portraits,
+    bool correct_pixel_aspect) const {
     const auto data = alternate_portraits && face_data_2_ != 0U
         ? face_data_2_ : face_data_;
     const auto frame_address = data + static_cast<std::uint32_t>(frame) * 640U;
@@ -382,8 +403,24 @@ void ScaledTextRenderer::draw_face(
                             pixel |= static_cast<std::uint8_t>(1U << plane);
                         }
                     }
-                    target.set(x + tile_x * 8 + column, y + tile_y * 8 + row,
-                        static_cast<std::uint8_t>(colour_index_base + pixel));
+                    const auto colour=static_cast<std::uint8_t>(colour_index_base+pixel);
+                    if(!correct_pixel_aspect) {
+                        target.set(x + tile_x * 8 + column, y + tile_y * 8 + row,colour);
+                    } else {
+                        // SNES 256x224 -> 4:3 presents pixels 7:6 wide. Wide
+                        // game canvases use square pixels, so correct only the
+                        // portrait, retaining its right edge beside the text.
+                        // Work at stored resolution to avoid rounding a 32px
+                        // portrait to a coarse logical width at high upscale.
+                        const auto scale=static_cast<std::int32_t>(target.draw_scale());
+                        const auto edge=[scale](int value) {return (value*scale*7+3)/6;};
+                        const auto left=(x+32)*scale-edge(32);
+                        const auto source_x=tile_x*8+column;
+                        const auto top=(y+tile_y*8+row)*scale;
+                        for(auto py=top;py<top+scale;++py)
+                            for(auto px=left+edge(source_x);px<left+edge(source_x+1);++px)
+                                target.set_stored(px,py,colour);
+                    }
                 }
             }
         }
@@ -411,6 +448,11 @@ void ScaledTextRenderer::draw_ascii(
         const auto ascii = static_cast<std::uint8_t>(character);
         if (ascii == '\n') {
             y += 13;
+            continue;
+        }
+        if (ascii == ':') {
+            draw_host_colon(x,y,target,output_colour);
+            x += 5;
             continue;
         }
         if (ascii == '/') {
@@ -468,6 +510,11 @@ void ScaledTextRenderer::draw_ascii_compact(
         }
         // The source translation aliases slash to a vertical separator.
         // Host-authored labels need an actual diagonal slash.
+        if (ascii == ':') {
+            draw_host_colon(x,y,target,output_colour,true);
+            x += 5;
+            continue;
+        }
         if (ascii == '/') {
             for (std::int32_t row = 0; row < output_height; ++row) {
                 target.set(x + 3 - row * 4 / output_height, y + row,
@@ -515,7 +562,7 @@ std::int32_t ScaledTextRenderer::measure_ascii(std::string_view text) const {
         if (ascii < 32U) continue;
         const auto translated = rom_->read8(
             game_font_translation_ + static_cast<std::uint32_t>(ascii - 32U));
-        line_width += (ascii == 32U || ascii == '/') ? 5
+        line_width += (ascii == 32U || ascii == '/' || ascii == ':') ? 5
             : static_cast<std::int32_t>(
                 rom_->read8(game_font_widths_ + translated));
     }

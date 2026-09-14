@@ -17,15 +17,19 @@ def main():
         "STARFOX_TEST_RENDER_SCALE": "2", "STARFOX_TEST_BLOOM": "0",
         "STARFOX_TEST_EFFECT": "0", "STARFOX_TEST_WORLD_EFFECT": "0",
         "STARFOX_TEST_2D_FILTER": "0", "STARFOX_TEST_MODEL_SMOOTHING": "0",
-        "STARFOX_TEST_RTX_LIGHTING": "0", "STARFOX_TEST_DISPLAY_MODE": "1",
+        "STARFOX_TEST_RTX_LIGHTING": "0", "STARFOX_TEST_RAY_TRACING": "0",
+        "STARFOX_TEST_DISPLAY_MODE": "1",
         "STARFOX_TEST_EXPERIENCE": "ORIGINAL",
     })
     baseline = None
     with tempfile.TemporaryDirectory(prefix="sfe-isolated-effects-") as directory:
-        for mode in ("off", "chromatic", "hdr", "shadows", "off-repeat"):
+        # Enhanced Shadows was removed in favor of hardware ray tracing.
+        # The retired override must stay inert; DXR needs a real GPU device
+        # and is covered by tools/check_ray_tracing.ps1, not SDL's dummy driver.
+        for mode in ("off", "chromatic", "hdr", "retired-shadows", "off-repeat"):
             env["STARFOX_TEST_CHROMATIC_ABERRATION"] = "3" if mode == "chromatic" else "0"
             env["STARFOX_TEST_HDR_EFFECT"] = "3" if mode == "hdr" else "0"
-            env["STARFOX_TEST_ENHANCED_SHADOWS"] = "1" if mode == "shadows" else "0"
+            env["STARFOX_TEST_ENHANCED_SHADOWS"] = "1" if mode == "retired-shadows" else "0"
             capture = Path(directory) / (mode + ".bmp")
             env["STARFOX_CAPTURE_PATH"] = str(capture)
             subprocess.run([runtime, rom, symbols, "LEVEL1_1"], env=env,
@@ -35,6 +39,9 @@ def main():
                 raise AssertionError(f"Invalid {mode} capture")
             if mode == "off":
                 baseline = pixels
+            elif mode == "retired-shadows":
+                if pixels != baseline:
+                    raise AssertionError("Retired shadow override changed the image")
             elif mode == "off-repeat":
                 if pixels != baseline:
                     raise AssertionError("Baseline capture is nondeterministic")

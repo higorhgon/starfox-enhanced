@@ -34,7 +34,7 @@ The main page opens dedicated **2D Options** and **3D Options** submenus,
 keeping full-height text and all main-page entries visible without scrolling.
 2D Options contains 2D Filter, 2D Bloom, World Effects and World Effect Intensity.
 3D Options contains Anti-Aliasing, VSync, Render Upscale, 3D Bloom, 3D Smoothing,
-Enhanced Lighting, HDR Effect, Enhanced Shadows, Chromatic Aberration, Model Effects,
+Enhanced Lighting, HDR Effect, Ray Tracing, Chromatic Aberration, Model Effects,
 and Model Effect Intensity. B or BACK returns to
 the corresponding main-page entry; live Preview stays active in either submenu.
 `MODEL EFFECTS` and `WORLD EFFECTS` independently offer OFF,
@@ -52,8 +52,12 @@ pixels in linear light and spread tight and broad halos; HUD is excluded.
 Older combined Bloom settings migrate to the same strength for both options.
 `HDR EFFECT` offers OFF/LOW/MEDIUM/HIGH brightness and contrast processing; it is
 not HDR display output. `CHROMATIC ABERRATION` offers three strengths of RGB
-separation on models. `ENHANCED SHADOWS` replaces the original shadows with
-geometry-based soft shadows. These options are under 3D Options. Wireframe line
+separation on models. `RAY TRACING` defaults OFF and uses supported PC hardware
+to produce geometry-based shadows, replacing the native shadows only while
+that backend is active. Unsupported devices retain the native shadows; there
+is no separate Enhanced Shadows setting. Quest does not expose PC hardware
+ray tracing. `ENHANCED LIGHTING` is a separate visual effect, not ray tracing.
+These options are under 3D Options. Wireframe line
 sizing is automatic; legacy thickness overrides are ignored.
 
 `3D SMOOTHING` separately offers OFF/LOW/MEDIUM/HEAVY for colour transitions

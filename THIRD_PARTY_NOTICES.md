@@ -151,3 +151,31 @@ The GPU adaptation in `src/render/shaders/xbrz_compute.hlsli` and
 representations in `src/render/shaders/generated`, is also derived from this implementation
 and covered by GPLv3. Distributing a binary containing either implementation carries the GPLv3
 obligations for the combined work.
+
+
+## ScaleFX
+
+The portable ScaleFX compute shader is derived from Sp00kyFox's ScaleFX
+passes 0–4 in libretro/slang-shaders, revision
+b61e1ee4fc9e2119ec933461a0bfad024dd2950a (2017-03-01 shader revision).
+Source: https://github.com/libretro/slang-shaders/tree/b61e1ee4fc9e2119ec933461a0bfad024dd2950a/edge-smoothing/scalefx
+
+Copyright (c) 2016 Sp00kyFox - ScaleFX@web.de
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

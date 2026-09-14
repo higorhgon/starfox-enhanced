@@ -1,12 +1,66 @@
 #include "starfox/simulation/object_pool.hpp"
+#include "starfox/state/archive.hpp"
 
 #include <algorithm>
 #include <bit>
+#include <limits>
 #include <string>
 #include <stdexcept>
 #include <type_traits>
 
 namespace starfox::simulation {
+namespace {
+template<class Archive, class Object>
+void transfer_object(Archive& archive, Object& object) {
+    archive(object.shape, object.attached, object.flags, object.type,
+        object.count, object.count1, object.world_x, object.world_y, object.world_z,
+        object.rotation_x, object.rotation_y, object.rotation_z, object.velocity,
+        object.strategy_address, object.immune_object, object.collision_object,
+        object.strategy_flags, object.skid_y, object.scratch_bytes, object.scratch_words,
+        object.health, object.attack_power, object.weapon_type, object.open_al,
+        object.collision_count, object.collision_flags, object.velocity_x,
+        object.velocity_y, object.velocity_z, object.hit_flags, object.colour_frame,
+        object.animation_frame, object.sound1, object.sound2, object.colour_table,
+        object.texture_scroll_x, object.texture_scroll_y, object.fire_object,
+        object.strategy_state, object.extended);
+}
+}
+
+std::vector<std::uint8_t> ObjectPool::save_state() const {
+    state::Writer archive;
+    archive(std::uint32_t{1}, static_cast<std::uint16_t>(capacity_), layout_,
+        active_handles(), free_handles(), next_generation_, generations_);
+    for (const auto& slot : slots_) transfer_object(archive, slot.object);
+    return archive.bytes();
+}
+
+void ObjectPool::load_state(std::span<const std::uint8_t> bytes) {
+    state::Reader archive{bytes};
+    std::uint32_t version{};
+    std::uint16_t capacity{};
+    ObjectMemoryLayout layout{};
+    archive(version, capacity, layout);
+    if (version!=1U || capacity!=capacity_ || layout!=layout_)
+        throw std::runtime_error{"incompatible object-pool state"};
+    ObjectPool restored{capacity,layout};
+    std::vector<ObjectHandle> active, free;
+    archive(active,free);
+    restored.restore_lists(active,free);
+    archive(restored.next_generation_,restored.generations_);
+    for (auto& slot:restored.slots_) transfer_object(archive,slot.object);
+    archive.finish();
+    for (ObjectHandle handle=1;handle<=capacity;++handle) {
+        // Object fields may temporarily contain source initializer parameters
+        // (the map's opcode 10 writes its raw word into attached). Only the
+        // pool's own topology is guaranteed to contain resolved handles.
+        if (restored.generations_[handle]>restored.next_generation_
+            || (restored.is_active(handle) && restored.generations_[handle]==0U))
+            throw std::runtime_error{"invalid object-pool state"};
+    }
+    if (restored.next_generation_==std::numeric_limits<std::uint64_t>::max())
+        throw std::runtime_error{"exhausted object-pool generation counter"};
+    *this=std::move(restored);
+}
 
 ObjectPool::ObjectPool(std::size_t capacity, ObjectMemoryLayout layout)
     : capacity_(capacity), layout_(layout) {

@@ -1,6 +1,7 @@
 #include "starfox/app/runtime_input.hpp"
 #include "starfox/input/buttons.hpp"
 #include "starfox/render/effect_types.hpp"
+#include "starfox/render/display_aspect.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -25,6 +26,20 @@ void require(bool condition, const char* message) {
 } // namespace
 
 int main() {
+    for(unsigned scale:{1U,2U,4U,10U}) {
+        using namespace starfox::render;
+        const auto w=256U*scale,h=224U*scale;
+        const auto presented=presentation_width(w,h);
+        require(presented==(h*4U+1U)/3U,"native display is not corrected to 4:3");
+        require(presentation_to_raster_x(float(presented),w,h)==float(w),
+            "4:3 right-edge pointer does not map back to raster");
+        require(presentation_to_raster_x(float(presented)/2,w,h)==float(w)/2,
+            "4:3 centre pointer does not map back to raster");
+        for(unsigned wide:{360U,400U,520U,800U}) {
+            require(presentation_width(wide*scale,h)==wide*scale,
+                "native aspect correction changed a wide canvas");
+        }
+    }
     {
         starfox::input::InputLatch menu_input;
         menu_input.sample(starfox::input::a);
@@ -57,9 +72,34 @@ int main() {
 #endif
     require(std::strcmp(SDL_GetHint(SDL_HINT_XINPUT_ENABLED), "1") == 0,
             "XInput support was not enabled before SDL initialization");
-    require(std::strcmp(
-                SDL_GetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK), "1") == 0,
-            "Steam Deck HIDAPI support was not enabled before initialization");
+    // The application must preserve SDL's global-to-device inheritance and
+    // explicit launcher choices. Test without initializing physical devices.
+    const auto* deck_hint = SDL_GetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK);
+    const std::string original_deck_hint = deck_hint ? deck_hint : "";
+    const bool had_deck_hint = deck_hint != nullptr;
+    const auto* hidapi_hint = SDL_GetHint(SDL_HINT_JOYSTICK_HIDAPI);
+    const std::string original_hidapi_hint = hidapi_hint ? hidapi_hint : "";
+    const bool had_hidapi_hint = hidapi_hint != nullptr;
+    SDL_ResetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK);
+    SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI, "0", SDL_HINT_OVERRIDE);
+    starfox::app::configure_native_gamepad_support();
+    require(!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK,
+                SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI, true)),
+            "application overrode launcher's disabled HIDAPI backend");
+    SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, "0", SDL_HINT_OVERRIDE);
+    starfox::app::configure_native_gamepad_support();
+    require(!SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, true),
+            "application overrode explicit Deck backend disable");
+    SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, "1", SDL_HINT_OVERRIDE);
+    starfox::app::configure_native_gamepad_support();
+    require(SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, false),
+            "application overrode explicit Deck backend enable");
+    SDL_ResetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK);
+    SDL_ResetHint(SDL_HINT_JOYSTICK_HIDAPI);
+    if(had_deck_hint) SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK,
+        original_deck_hint.c_str(), SDL_HINT_OVERRIDE);
+    if(had_hidapi_hint) SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI,
+        original_hidapi_hint.c_str(), SDL_HINT_OVERRIDE);
     require(SDL_Init(SDL_INIT_GAMEPAD), "SDL gamepad initialization failed");
 
     SDL_VirtualJoystickDesc description{};
@@ -79,6 +119,27 @@ int main() {
     require(gamepad != nullptr, "preferred Steam Deck gamepad was not opened");
     require(starfox::app::gamepad_device_label(gamepad) == "STEAM DECK",
             "Steam Deck was not identified in the remapping UI");
+    {
+        auto steam_description=description;
+        steam_description.product_id=0x11ffU;
+        // Detection must work from Valve's device ID, not a required name.
+        steam_description.name="Steam Input compatibility fixture";
+        const auto steam_id=SDL_AttachVirtualJoystick(&steam_description);
+        require(steam_id!=0,"Steam Input virtual fixture could not attach");
+        auto* preferred=starfox::app::open_preferred_gamepad();
+        require(preferred && SDL_GetGamepadID(preferred)==steam_id,
+            "raw Deck controller displaced Steam Input");
+        SDL_CloseGamepad(preferred);
+        auto players=starfox::app::open_player_gamepads();
+        require(players.size()==1 && SDL_GetGamepadID(players.front())==steam_id,
+            "raw Deck controller was duplicated as an EX player");
+        for(auto* player:players) SDL_CloseGamepad(player);
+        require(SDL_DetachVirtualJoystick(steam_id),"Steam Input fixture could not detach");
+        preferred=starfox::app::open_preferred_gamepad();
+        require(preferred && SDL_GetGamepadID(preferred)==identifier,
+            "native Deck fallback failed after Steam Input disconnected");
+        SDL_CloseGamepad(preferred);
+    }
     auto* joystick = SDL_GetGamepadJoystick(gamepad);
     require(joystick != nullptr, "opened gamepad has no joystick interface");
 
@@ -163,6 +224,29 @@ int main() {
     require(SDL_SetJoystickVirtualButton(
                 joystick, SDL_GAMEPAD_BUTTON_SOUTH, false),
             "virtual Steam Deck south button could not release");
+    const std::pair<SDL_GamepadButton,starfox::input::ButtonMask> deck_buttons[]{
+        {SDL_GAMEPAD_BUTTON_SOUTH,starfox::input::b},
+        {SDL_GAMEPAD_BUTTON_EAST,starfox::input::a},
+        {SDL_GAMEPAD_BUTTON_WEST,starfox::input::y},
+        {SDL_GAMEPAD_BUTTON_NORTH,starfox::input::x},
+        {SDL_GAMEPAD_BUTTON_START,starfox::input::start},
+        {SDL_GAMEPAD_BUTTON_BACK,starfox::input::select},
+        {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,starfox::input::left_shoulder},
+        {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,starfox::input::right_shoulder},
+        {SDL_GAMEPAD_BUTTON_DPAD_UP,starfox::input::up},
+        {SDL_GAMEPAD_BUTTON_DPAD_DOWN,starfox::input::down},
+        {SDL_GAMEPAD_BUTTON_DPAD_LEFT,starfox::input::left},
+        {SDL_GAMEPAD_BUTTON_DPAD_RIGHT,starfox::input::right},
+        {SDL_GAMEPAD_BUTTON_GUIDE,0}, {SDL_GAMEPAD_BUTTON_MISC1,0}};
+    for(const auto [button,expected]:deck_buttons) {
+        require(SDL_SetJoystickVirtualButton(joystick,button,true),"Deck button press failed");
+        SDL_UpdateGamepads();
+        require(bindings.sample_gamepad_only(gamepad)==expected,
+            "Deck button produced wrong or additional gameplay actions");
+        require(SDL_SetJoystickVirtualButton(joystick,button,false),"Deck button release failed");
+        SDL_UpdateGamepads();
+        require(bindings.sample_gamepad_only(gamepad)==0,"Deck release left input stuck");
+    }
     bindings.bind_gamepad_button(
         8U, SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1);
     require(SDL_SetJoystickVirtualButton(
@@ -303,7 +387,7 @@ int main() {
         std::string legacy, line;
         while (std::getline(current, line)) {
             if (line.starts_with("TWO_D_FILTER ")) continue;
-            legacy += (line == "SFE_PREGAME_V12" ? "SFE_PREGAME_V11" : line) + "\n";
+            legacy += (line.starts_with("SFE_PREGAME_V") ? "SFE_PREGAME_V11" : line) + "\n";
         }
         current.close();
         std::ofstream previous{pregame_test_path, std::ios::trunc};
@@ -315,17 +399,63 @@ int main() {
                     && loaded_pregame == expected,
                 "V11 migration changed unrelated settings or lost the filter");
     }
-    for (std::uint8_t filter = 0; filter < 5; ++filter) {
+    for (std::uint8_t filter = 0; filter < 6; ++filter) {
         auto settings = saved_pregame;
         settings.two_d_filter = filter;
         require(starfox::app::save_pregame_settings(pregame_test_path, settings)
             && starfox::app::load_pregame_settings(pregame_test_path, loaded_pregame)
             && loaded_pregame == settings, "filter setting did not round-trip");
     }
-    for (std::uint8_t language = 0; language < 5; ++language) {
+    {
+        require(starfox::app::save_pregame_settings(pregame_test_path, saved_pregame),
+            "could not write pre-stereo migration fixture");
+        std::ifstream current{pregame_test_path};
+        std::string legacy, line;
+        while (std::getline(current, line)) {
+            if (line.starts_with("STEREO_OUTPUT ")) continue;
+            legacy += (line.starts_with("SFE_PREGAME_V") ? "SFE_PREGAME_V12" : line) + "\n";
+        }
+        current.close();
+        std::ofstream previous{pregame_test_path, std::ios::trunc};
+        previous << legacy;
+        previous.close();
+        loaded_pregame.stereo_output = 2;
+        require(starfox::app::load_pregame_settings(pregame_test_path, loaded_pregame)
+            && loaded_pregame == saved_pregame && loaded_pregame.stereo_output == 0,
+            "pre-stereo settings did not default to OFF");
+    }
+    for (std::uint8_t mode = 0; mode < 3; ++mode) {
+        auto settings = saved_pregame;
+        settings.stereo_output = mode;
+        require(starfox::app::save_pregame_settings(pregame_test_path, settings)
+            && starfox::app::load_pregame_settings(pregame_test_path, loaded_pregame)
+            && loaded_pregame == settings, "stereo output did not round-trip");
+    }
+    for (const int invalid : {-1, 3, 256}) {
+        require(starfox::app::save_pregame_settings(pregame_test_path, saved_pregame),
+            "could not write stereo validation fixture");
+        std::ofstream bad{pregame_test_path, std::ios::app};
+        bad << "STEREO_OUTPUT " << invalid << '\n';
+        bad.close();
+        auto unchanged = saved_pregame;
+        require(!starfox::app::load_pregame_settings(pregame_test_path, unchanged)
+            && unchanged == saved_pregame, "invalid stereo output accepted or mutated settings");
+    }
+    {
+        auto settings = saved_pregame;
+        settings.stereo_output = 3;
+        require(!starfox::app::save_pregame_settings(pregame_test_path, settings),
+            "invalid stereo output saved");
+    }
+    for (std::uint8_t language = 0; language < 6; ++language) {
         auto settings = saved_pregame;
         settings.language = language;
-        settings.enhanced_shadows = (language % 2) != 0;
+        settings.ray_tracing = (language % 2) == 0;
+        settings.infinite_bombs = (language % 2) == 0;
+        settings.infinite_lives = (language % 2) != 0;
+        settings.infinite_boost = (language % 2) != 0;
+        settings.default_laser = language % 3;
+        settings.selected_level = language == 0 ? 0U : 11U + language;
         settings.chromatic_aberration = language % 4;
         settings.hdr_effect = language % 4;
         require(starfox::app::save_pregame_settings(pregame_test_path, settings)
@@ -342,9 +472,22 @@ int main() {
             && loaded_pregame.wireframe_thickness==1U,
             "legacy line thickness override was not ignored");
     }
+    for(const bool ray_tracing:{false,true}) {
+        auto settings=saved_pregame;
+        settings.ray_tracing=ray_tracing;
+        require(starfox::app::save_pregame_settings(pregame_test_path,settings),
+            "could not write shadow migration fixture");
+        std::ofstream legacy{pregame_test_path,std::ios::app};
+        legacy << "ENHANCED_SHADOWS 1\n";
+        legacy.close();
+        require(starfox::app::load_pregame_settings(pregame_test_path,loaded_pregame)
+            && !loaded_pregame.enhanced_shadows
+            && loaded_pregame.ray_tracing==ray_tracing,
+            "legacy Enhanced Shadows changed the ray-tracing choice");
+    }
     {
         auto settings = saved_pregame;
-        settings.language = 5;
+        settings.language = 6;
         require(!starfox::app::save_pregame_settings(pregame_test_path, settings),
             "invalid language setting was saved");
     }

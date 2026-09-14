@@ -21,8 +21,9 @@ struct Parameters {
     std::uint32_t bloom_model,bloom_world,bloom_width,bloom_height;
     std::uint32_t filter,highlight_filter,pad2,pad3;
     std::uint32_t shadow_width,shadow_height; std::int32_t shadow_y; std::uint32_t shadow_enabled;
+    std::array<std::uint32_t,192> window_rows{};
 };
-static_assert(sizeof(Parameters)==144);
+static_assert(sizeof(Parameters)==912);
 static_assert(sizeof(SurfaceSample)==20 && offsetof(SurfaceSample,valid)==17);
 }
 struct GpuEffects::Impl {
@@ -35,11 +36,13 @@ struct GpuEffects::Impl {
     ComPtr<ID3D11ShaderResourceView> tag_view;
     ComPtr<ID3D11Buffer> indexed,surface_data;
     ComPtr<ID3D11ShaderResourceView> indexed_view,surface_view;
-    unsigned surface_bytes{};
+    unsigned surface_bytes{},indexed_bytes{};
+    std::vector<std::uint8_t> padded;
     ComPtr<ID3D11Buffer> shadow_data;
     ComPtr<ID3D11ShaderResourceView> shadow_view;
     unsigned shadow_bytes{};
-    ComPtr<ID3D11Texture2D> images[2],readback;
+    ComPtr<ID3D11Texture2D> images[2],readback,capture;
+    bool capture_pending{};
     ComPtr<ID3D11Texture2D> bloom_snapshots[2];
     ComPtr<ID3D11Texture2D> split_snapshots[2],split_glow;
     ComPtr<ID3D11ShaderResourceView> split_inputs[2];
@@ -67,7 +70,8 @@ struct GpuEffects::Impl {
     void resize(unsigned w,unsigned h) {
         if(w==width && h==height) return;
         for(unsigned i=0;i<2;++i) { images[i].Reset(); inputs[i].Reset(); outputs[i].Reset(); }
-        readback.Reset(); tags.Reset(); tag_view.Reset(); width=height=0;
+        readback.Reset(); capture.Reset();capture_pending=false;
+        tags.Reset(); tag_view.Reset(); width=height=0;
         for(auto& snapshot:bloom_snapshots) snapshot.Reset();
         for(unsigned i=0;i<2;++i) {split_snapshots[i].Reset();split_inputs[i].Reset();}
         split_glow.Reset();split_output.Reset();
@@ -135,6 +139,7 @@ struct GpuEffects::Impl {
     }
     void apply(const Framebuffer& frame,std::vector<std::uint8_t>& rgba,const GpuEffectSettings& settings) {
         resize(frame.stored_width(),frame.stored_height());
+        capture_pending=false;
         auto* presentation=static_cast<ID3D11Texture2D*>(settings.presentation_texture);
         auto* glow_presentation=static_cast<ID3D11Texture2D*>(settings.presentation_glow_texture);
         auto* model_presentation=static_cast<ID3D11Texture2D*>(settings.presentation_model_texture);
@@ -155,7 +160,7 @@ struct GpuEffects::Impl {
         }
         context->UpdateSubresource(images[0].Get(),0,nullptr,rgba.data(),width*4,0);
         // The last raw load is a full DWORD, including odd-sized buffers.
-        std::vector<std::uint8_t> padded((frame.pixels().size()+3)&~std::size_t(3),0);
+        padded.resize((frame.pixels().size()+3)&~std::size_t(3),0);
         std::copy(frame.layer_tags().begin(),frame.layer_tags().end(),padded.begin());
         context->UpdateSubresource(tags.Get(),0,nullptr,padded.data(),0,0);
         Parameters p{width,height,frame.draw_scale(),0,settings.hdr,settings.chromatic,settings.smoothing,
@@ -184,7 +189,11 @@ struct GpuEffects::Impl {
             p.maximum_x=std::min(int(width)-1,p.surface_x+int(surface.maximum_x()));
             p.maximum_y=std::min(int(height)-1,p.surface_y+int(surface.maximum_y()));
             std::copy(frame.pixels().begin(),frame.pixels().end(),padded.begin());
-            raw_buffer(indexed,indexed_view,unsigned(padded.size()),padded.data());
+            if(!indexed || indexed_bytes!=padded.size()) {
+                raw_buffer(indexed,indexed_view,unsigned(padded.size()),nullptr);
+                indexed_bytes=unsigned(padded.size());
+            }
+            context->UpdateSubresource(indexed.Get(),0,nullptr,padded.data(),0,0);
             const auto bytes=unsigned(surface.samples().size_bytes());
             if(!surface_data || bytes!=surface_bytes) {
                 raw_buffer(surface_data,surface_view,bytes,nullptr); surface_bytes=bytes;
@@ -254,7 +263,13 @@ struct GpuEffects::Impl {
             current=1-current;
         }
         context->CSSetShader(nullptr,nullptr,0);
-        context->CopyResource(readback.Get(),images[current].Get());
+        if(presentation) {
+            if(!capture) {
+                D3D11_TEXTURE2D_DESC desc{};images[0]->GetDesc(&desc);desc.BindFlags=0;
+                checked(device->CreateTexture2D(&desc,nullptr,capture.GetAddressOf()),"GPU capture texture failed");
+            }
+            context->CopyResource(capture.Get(),images[current].Get());capture_pending=true;
+        } else context->CopyResource(readback.Get(),images[current].Get());
         if(glow_presentation) {
             p.stage=16;context->UpdateSubresource(parameters.Get(),0,nullptr,&p,0,0);
             context->CSSetShader(shader.Get(),nullptr,0);
@@ -319,6 +334,10 @@ bool GpuEffects::readback(std::vector<std::uint8_t>& rgba) {
 #if defined(STARFOX_GPU_EFFECTS)
     if(!impl_ || !impl_->readback || rgba.size()!=std::size_t(impl_->width)*impl_->height*4) return false;
     D3D11_MAPPED_SUBRESOURCE mapped{};
+    if(impl_->capture_pending) {
+        impl_->context->CopyResource(impl_->readback.Get(),impl_->capture.Get());
+        impl_->capture_pending=false;
+    }
     if(FAILED(impl_->context->Map(impl_->readback.Get(),0,D3D11_MAP_READ,0,&mapped))) return false;
     for(unsigned y=0;y<impl_->height;++y)
         std::memcpy(rgba.data()+std::size_t(y)*impl_->width*4,
@@ -330,6 +349,10 @@ bool GpuEffects::readback(std::vector<std::uint8_t>& rgba) {
 }
 bool GpuEffects::apply(void* source,const Framebuffer& frame,std::vector<std::uint8_t>& rgba,
     const GpuEffectSettings& settings) {
+    if(settings.resident_shadow.buffer) return false; // SDL GPU buffers are not D3D11 resources.
+    if(settings.planet_fade) return false; // SDL GPU or matching CPU fallback.
+    if(settings.subtractive_overlays[0] || settings.subtractive_overlays[1]) return false;
+    if(settings.filter==5 || settings.horizontal_wipe || settings.circle || settings.background_subtract || settings.colour_math || settings.window_mask || settings.host_overlay || settings.confirmation_overlay || settings.setup_overlay || settings.touch_controls) return false; // SDL GPU or matching CPU fallback.
     if(!impl_) impl_=std::make_unique<Impl>();
 #if defined(STARFOX_GPU_EFFECTS)
     if(!source || !frame.layer_tags_enabled() || rgba.size()!=frame.pixels().size()*4 || rgba.empty()) return false;

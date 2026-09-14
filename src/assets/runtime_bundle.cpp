@@ -10,6 +10,16 @@
 #include <string>
 
 namespace starfox::assets {
+std::uint32_t runtime_companion_manifest(std::span<const std::uint8_t> (*resource)(int)) {
+    if(!resource) throw std::invalid_argument("Missing runtime resource provider");
+    constexpr std::array identifiers{101,102,108,109,120,121,122,123,124,125,126};
+    std::array<RuntimeManifestResource,identifiers.size()> resources{};
+    for(std::size_t i=0;i<identifiers.size();++i) {
+        resources[i]={resource(identifiers[i]),identifiers[i]==102 || identifiers[i]==109};
+        if(resources[i].bytes.empty()) throw std::runtime_error("Missing runtime manifest resource: "+std::to_string(identifiers[i]));
+    }
+    return runtime_asset_manifest(resources);
+}
 namespace {
 
 constexpr std::array<std::uint8_t, 8> magic{

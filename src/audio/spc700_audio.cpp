@@ -1,6 +1,10 @@
 #include "starfox/audio/spc700_audio.hpp"
+#include "starfox/state/archive.hpp"
+#include "starfox/state/container.hpp"
 
 #include <spc.h>
+#include <SPC_Filter.h>
+#include <SNES_SPC.h>
 
 #include <algorithm>
 #include <array>
@@ -37,6 +41,28 @@ void throw_spc_error(const char* operation, spc_err_t error) {
             std::string{operation} + ": " + error};
     }
 }
+
+// The pinned core passes io only to this callback, including extension bytes.
+// Keep the bounds in a stack-local context rather than global callback state.
+struct CoreStateCopy {
+    std::vector<std::uint8_t> output;
+    std::span<const std::uint8_t> input;
+    bool reading{};
+    static void copy(unsigned char** io, void* fields, std::size_t count) {
+        auto& self = *reinterpret_cast<CoreStateCopy*>(*io);
+        if (self.reading) {
+            if (count > self.input.size())
+                throw std::runtime_error{"Truncated SPC core state"};
+            std::memcpy(fields, self.input.data(), count);
+            self.input = self.input.subspan(count);
+        } else {
+            if (count > spc_state_size - self.output.size())
+                throw std::runtime_error{"Oversized SPC core state"};
+            auto* first = static_cast<const std::uint8_t*>(fields);
+            self.output.insert(self.output.end(), first, first + count);
+        }
+    }
+};
 
 } // namespace
 
@@ -79,6 +105,49 @@ struct Spc700Audio::Impl {
     ~Impl() {
         spc_filter_delete(filter);
         spc_delete(spc);
+    }
+
+    void save(state::Writer& writer) const {
+        CoreStateCopy core;
+        auto* context = reinterpret_cast<unsigned char*>(&core);
+        spc_copy_state(spc, &context, CoreStateCopy::copy);
+        std::array<int, 8> history{};
+        static_assert(sizeof(int) == sizeof(std::int32_t));
+        filter->save_history(history.data());
+        int clocks{}, carry_count{};
+        std::array<short, SNES_SPC::extra_size> carry{};
+        spc->save_output_carry(clocks, carry_count, carry.data());
+        writer(aram, cpu_ports, static_cast<std::uint8_t>(upload_state),
+            upload_address, execute_address, transfer_enabled, uploading, loaded,
+            static_cast<std::uint64_t>(upload_count), history, core.output,
+            clocks, carry_count, carry);
+    }
+
+    void load(state::Reader& reader) {
+        std::uint8_t upload{};
+        std::uint64_t count{};
+        std::array<int, 8> history{};
+        std::vector<std::uint8_t> core_bytes;
+        int clocks{}, carry_count{};
+        std::array<short, SNES_SPC::extra_size> carry{};
+        reader(aram, cpu_ports, upload, upload_address, execute_address,
+            transfer_enabled, uploading, loaded, count, history, core_bytes,
+            clocks, carry_count, carry);
+        if (upload > static_cast<std::uint8_t>(UploadState::waiting_for_data)
+            || count > std::numeric_limits<std::size_t>::max()
+            || (loaded && uploading) || history[0] != spc_filter_gain_unit
+            || history[1] != spc_filter_bass_norm || core_bytes.size() > spc_state_size
+            || carry_count < 0 || carry_count > SNES_SPC::extra_size
+            || (carry_count & 1) != 0 || clocks < 0 || clocks > kClocksPerLogicTick + 31)
+            throw std::runtime_error{"Invalid SPC host state"};
+        upload_state = static_cast<UploadState>(upload);
+        upload_count = static_cast<std::size_t>(count);
+        CoreStateCopy core{{}, core_bytes, true};
+        auto* context = reinterpret_cast<unsigned char*>(&core);
+        spc_copy_state(spc, &context, CoreStateCopy::copy);
+        if (!core.input.empty()) throw std::runtime_error{"Trailing SPC core state"};
+        filter->load_history(history.data());
+        spc->load_output_carry(clocks, carry_count, carry.data());
     }
 
     void begin_upload() noexcept {
@@ -275,6 +344,28 @@ Spc700Audio::Spc700Audio()
 Spc700Audio::~Spc700Audio() = default;
 Spc700Audio::Spc700Audio(Spc700Audio&&) noexcept = default;
 Spc700Audio& Spc700Audio::operator=(Spc700Audio&&) noexcept = default;
+
+std::vector<std::uint8_t> Spc700Audio::save_state() const {
+    state::Writer writer;
+    music_impl_->save(writer);
+    effects_impl_->save(writer);
+    writer(last_music_samples_, last_effect_samples_);
+    return state::pack(0x53504301U, 0U, writer.bytes());
+}
+
+void Spc700Audio::load_state(std::span<const std::uint8_t> bytes) {
+    state::Reader reader{state::unpack(bytes, 0x53504301U, 0U)};
+    Spc700Audio restored;
+    restored.music_impl_->load(reader);
+    restored.effects_impl_->load(reader);
+    reader(restored.last_music_samples_, restored.last_effect_samples_);
+    reader.finish();
+    const auto samples = restored.last_music_samples_.size();
+    if (samples != restored.last_effect_samples_.size()
+        || (samples != 0U && samples != stereo_frames_per_logic_tick * 2U))
+        throw std::runtime_error{"Invalid SPC stem buffer size"};
+    *this = std::move(restored);
+}
 
 std::vector<std::int16_t> Spc700Audio::render_logic_tick(
     std::span<const simulation::ApuPortWrite> writes) {

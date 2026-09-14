@@ -741,6 +741,7 @@ int main(int argc, char** argv) {
         ppu.background_mode=2U;
         ppu.bg2_screen_size=0U;
         ppu.bg2_scanline_scroll_enabled=true;
+        ppu.tunnel_scene=true; // water uses scanline scrolling too
         for(unsigned i=0;i<1024;++i) ppu.vram[ppu.bg2_screen_base*2U+i*2U]=1U;
         for(unsigned y=0;y<8;++y) ppu.vram[ppu.bg2_character_base*2U+32U+y*2U]=255U;
         starfox::render::BackgroundRenderer renderer;
@@ -751,7 +752,7 @@ int main(int argc, char** argv) {
             renderer.draw_bg2(ppu,0,0,native);
             for(unsigned y=0;y<8;++y) for(unsigned x=0;x<width;++x) {
                 const auto expected=x<unsigned(origin) || x>=unsigned(origin)+256U
-                    ? 0U : native.get(x-origin,y);
+                    ? 1U : native.get(x-origin,y); // Solid tile-1 wall, not palette black.
                 require(wide.get(x,y)==expected,"tunnel duplicated artwork into wide borders or changed native centre");
             }
             require(native.get(0,0)!=0U,"tunnel regression fixture is empty");
@@ -944,6 +945,7 @@ int main(int argc, char** argv) {
         check_filter(TwoDFilter::edge, scale, dump_directory);
         check_filter(TwoDFilter::sharp_bilinear, scale, dump_directory);
         check_filter(TwoDFilter::crt, scale, dump_directory);
+        check_filter(TwoDFilter::scalefx, scale, dump_directory);
         if (starfox::render::two_d_filter_compiled_in(TwoDFilter::xbrz)) {
             check_filter(TwoDFilter::xbrz, scale, dump_directory);
         }

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -110,8 +111,15 @@ public:
     Wdc65816(const Wdc65816&) = delete;
     Wdc65816& operator=(const Wdc65816&) = delete;
 
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    void load_state(std::span<const std::uint8_t> bytes);
+
     [[nodiscard]] std::uint8_t read8(std::uint32_t address) const;
     [[nodiscard]] std::uint16_t read16(std::uint32_t address) const;
+    // Presentation/debug RAM reads never touch open bus or I/O latches.
+    // Unsupported/ROM/I/O addresses return nullopt rather than reading them.
+    [[nodiscard]] std::optional<std::uint8_t> peek_ram8(std::uint32_t address) const noexcept;
+    [[nodiscard]] std::optional<std::uint16_t> peek_ram16(std::uint32_t address) const noexcept;
     void write8(std::uint32_t address, std::uint8_t value);
     void write16(std::uint32_t address, std::uint16_t value);
     [[nodiscard]] bool load_cartridge_ram(
@@ -145,6 +153,7 @@ public:
     // ENDSEQ's SEQSCROLL runs once per raster, independently of CPU tasks.
     void tick_ending_video_phase();
     void tick_background_video_phase();
+    void refresh_background_metadata();
     void draw_planet_sphere(std::uint16_t sprite);
     void set_bg2_vertical_offsets_enabled(bool enabled) noexcept;
     void capture_bg2_horizontal_offsets(

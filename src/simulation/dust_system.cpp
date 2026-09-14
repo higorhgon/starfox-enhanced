@@ -1,9 +1,28 @@
 #include "starfox/simulation/dust_system.hpp"
+#include "starfox/state/archive.hpp"
 
 #include <bit>
 #include <span>
 
 namespace starfox::simulation {
+
+std::vector<std::uint8_t> DustSystem::save_state() const {
+    state::Writer archive;
+    archive(std::uint32_t{1},random_,carry_);
+    for (const auto& point:points_) archive(point.x,point.y,point.z);
+    return archive.bytes();
+}
+
+void DustSystem::load_state(std::span<const std::uint8_t> bytes) {
+    auto restored=*this;
+    state::Reader archive{bytes};
+    std::uint32_t version{};
+    archive(version,restored.random_,restored.carry_);
+    if (version!=1U) throw std::runtime_error{"incompatible dust state"};
+    for (auto& point:restored.points_) archive(point.x,point.y,point.z);
+    archive.finish();
+    *this=std::move(restored);
+}
 
 std::uint16_t DustSystem::next_random() noexcept {
     const auto swapped = static_cast<std::uint16_t>(

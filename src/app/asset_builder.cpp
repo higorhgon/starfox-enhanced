@@ -57,20 +57,7 @@ std::string text_resource(int identifier) {
 }
 
 std::uint32_t asset_manifest() {
-    const std::array resources{
-        starfox::assets::RuntimeManifestResource{resource(101)},
-        starfox::assets::RuntimeManifestResource{resource(102), true},
-        starfox::assets::RuntimeManifestResource{resource(108)},
-        starfox::assets::RuntimeManifestResource{resource(109), true},
-        starfox::assets::RuntimeManifestResource{resource(120)},
-        starfox::assets::RuntimeManifestResource{resource(121)},
-        starfox::assets::RuntimeManifestResource{resource(122)},
-        starfox::assets::RuntimeManifestResource{resource(123)},
-        starfox::assets::RuntimeManifestResource{resource(124)},
-        starfox::assets::RuntimeManifestResource{resource(125)},
-        starfox::assets::RuntimeManifestResource{resource(126)},
-    };
-    return starfox::assets::runtime_asset_manifest(resources);
+    return starfox::assets::runtime_companion_manifest(resource);
 }
 
 std::pair<std::string_view, std::vector<std::uint8_t>> canonicalize_retail(

@@ -68,6 +68,8 @@ public:
     [[nodiscard]] std::size_t uploaded_bytes() const noexcept;
     [[nodiscard]] std::array<std::uint8_t, 4> output_ports() const noexcept;
     [[nodiscard]] State state() const;
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    void load_state(std::span<const std::uint8_t> bytes);
 
 private:
     struct Impl;

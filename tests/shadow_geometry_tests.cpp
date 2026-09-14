@@ -31,6 +31,23 @@ int main() {
         scene.add(triangle); reference.push_back(triangle);
     }
     scene.build();
+    std::vector<Scene::GpuNode> packed_nodes;
+    std::vector<Scene::GpuTriangle> packed_triangles;
+    require(scene.pack_gpu(packed_nodes,packed_triangles),"built scene must export GPU hierarchy");
+    require(packed_triangles.size()==scene.triangle_count(),"GPU triangle count");
+    for(const auto& node:packed_nodes) {
+        if(node.count) {
+            require(std::size_t(node.begin)+node.count<=packed_triangles.size(),"GPU leaf range");
+            for(unsigned i=node.begin;i<node.begin+node.count;++i) {
+                const auto& triangle=scene.triangles()[i];
+                for(const auto vertex:{triangle.a,triangle.b,triangle.c}) {
+                    require(node.low[0]<=vertex.x && node.high[0]>=vertex.x
+                        && node.low[1]<=vertex.y && node.high[1]>=vertex.y
+                        && node.low[2]<=vertex.z && node.high[2]>=vertex.z,"GPU bounds must enclose source vertices");
+                }
+            }
+        } else require(node.left<packed_nodes.size() && node.right<packed_nodes.size(),"GPU child indices");
+    }
     const auto prepared_light=scene.prepare_direction({0,1,0});
     for (int x=-85;x<=85;++x) {
         const Vec3 origin{double(x),-5,0};
@@ -58,6 +75,8 @@ int main() {
         }
     }
     scene.clear(); scene.build();
+    require(scene.pack_gpu(packed_nodes,packed_triangles) && packed_nodes.empty()
+        && packed_triangles.empty(),"GPU export must clear previous frame");
     require(!scene.occluded({0,-5,0},{0,1,0}), "scene retained previous frame casters");
     scene.add({{-10,-10,20},{10,-10,20},{0,10,40}});
     scene.add({{-10,-10,60},{10,-10,60},{0,10,60}});

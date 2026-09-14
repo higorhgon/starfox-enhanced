@@ -90,6 +90,21 @@ int main(int argc, char** argv) {
                 && palette[2].g == 255 && palette[3].b == 255,
             "SNES BGR555 palette expansion is wrong");
     const auto half_palette = starfox::render::apply_snes_brightness(palette, 7);
+    for (const auto value : {0U, 1U, 50U, 100U, 255U}) {
+        starfox::render::Framebuffer bar{224,192};
+        bar.clear(31);
+        starfox::render::SpriteRenderer{}.draw_completion_bar(static_cast<std::uint8_t>(value),bar);
+        unsigned filled{};
+        for (int y=0; y<192; ++y) for (int x=0; x<224; ++x) {
+            const auto pixel=bar.get(x,y);
+            if (pixel==119) ++filled;
+            if (x<60 || x>=164 || y<24 || y>=36)
+                require(pixel==31,"completion bar altered surrounding UI");
+        }
+        require(filled==std::min(value,100U)*8U,"completion fill disagrees with source percentage");
+        require(bar.get(60,24)==126 && bar.get(163,35)==126
+            && bar.get(61,25)==31,"completion border/inset disagrees with source geometry");
+    }
     require(half_palette[1].r == 119 && half_palette[2].g == 119,
             "SNES master brightness scaling is wrong");
     starfox::render::Palette256 rgba_palette{};
@@ -296,6 +311,25 @@ int main(int argc, char** argv) {
                 && title_priority_frame.get(0, 0) == 42U,
             "title foreground dropped opaque black ink or promoted a low-priority backdrop");
 
+    auto guarded_title_ppu = title_priority_ppu;
+    guarded_title_ppu.main_screen = 1U;
+    guarded_title_ppu.vram[title_bg1_map] = 1U;
+    guarded_title_ppu.vram[title_bg1_map + 60U] = 1U;
+    starfox::render::Framebuffer wide_title_frame{400U, 8U};
+    wide_title_frame.clear(42U);
+    background_renderer.draw_title_foreground(
+        guarded_title_ppu, 0, 0, wide_title_frame, 72, true, true);
+    require(wide_title_frame.get(72, 0) == 42U
+                && wide_title_frame.get(312, 0) == 42U
+                && wide_title_frame.get(88, 0) == 1U,
+            "wide EX title retained black guard columns or lost interior black text");
+    wide_title_frame.clear(42U);
+    background_renderer.draw_title_foreground(
+        guarded_title_ppu, 0, 0, wide_title_frame, 72, true, false);
+    require(wide_title_frame.get(72, 0) == 1U
+                && wide_title_frame.get(312, 0) == 1U,
+            "native title guard pixels changed outside widescreen EX presentation");
+
     starfox::simulation::SnesPpuState unwrapped_title_ppu;
     unwrapped_title_ppu.background_mode = 1U;
     unwrapped_title_ppu.main_screen = 0x02U;
@@ -315,7 +349,104 @@ int main(int argc, char** argv) {
                 && unwrapped_title_frame.get(72, 0) == 42U
                 && unwrapped_title_frame.get(336, 0) == 42U,
             "wide title tilemap wrapped into duplicate outer columns");
+    // A singular planet must not acquire another tilemap occurrence in the
+    // added margins. Native-window wrapping remains cartridge-exact.
+    auto singular_planet_ppu = unwrapped_title_ppu;
+    singular_planet_ppu.bg2_screen_size = 0U;
+    for (const auto width : {256U, 400U, 800U}) {
+        const auto origin = static_cast<std::int32_t>((width - 256U) / 2U);
+        starfox::render::Framebuffer repeating{width, 8U};
+        starfox::render::Framebuffer singular{width, 8U};
+        repeating.clear(42U);
+        singular.clear(42U);
+        background_renderer.draw_bg2(singular_planet_ppu, -8, 0, repeating,
+            starfox::render::TilePriorityPass::all, origin, true);
+        background_renderer.draw_bg2(singular_planet_ppu, -8, 0, singular,
+            starfox::render::TilePriorityPass::all, origin, true, true, false, 8U);
+        for (auto x = origin; x < origin + 256; ++x) {
+            for (auto y = 0; y < 8; ++y) {
+                require(singular.get(x, y) == repeating.get(x, y),
+                    "single planet policy changed the native window");
+            }
+        }
+        if (width == 800U) {
+            require(repeating.get(origin + 264, 0) == 1U
+                        && singular.get(origin + 264, 0) == 0U
+                        && singular.get(origin + 8, 0) == 1U,
+                "single planet policy retained a duplicate or removed the original");
+        }
+    }
     auto tunnel_ppu = unwrapped_title_ppu;
+    auto water_ppu = unwrapped_title_ppu;
+    water_ppu.bg2_screen_size = 0;
+    water_ppu.bg2_scanline_scroll_enabled = true;
+    for (unsigned tile=0; tile<1024; ++tile)
+        water_ppu.vram[unwrapped_map_byte + tile*2] = 1;
+    for (unsigned row=0; row<8; ++row)
+        water_ppu.vram[static_cast<std::size_t>(water_ppu.bg2_character_base)*2U + 32U + row*2U] = 255;
+    for (const auto width : {400U,796U}) {
+        starfox::render::Framebuffer water_frame{width,8};
+        water_frame.clear(42);
+        background_renderer.draw_bg2(water_ppu,-8,0,water_frame,
+            starfox::render::TilePriorityPass::all,static_cast<int>((width-256)/2),true);
+        for (unsigned x=0; x<width; ++x)
+            require(water_frame.get(x,0)==1,"water scanline scrolling was incorrectly clipped as tunnel artwork");
+    }
+    // A contrasting bridge in the middle must not repeat into wide margins.
+    auto bridge_ppu = water_ppu;
+    const auto bridge_chars = static_cast<std::size_t>(bridge_ppu.bg2_character_base) * 2U;
+    for (unsigned row = 0; row < 8; ++row)
+        bridge_ppu.vram[bridge_chars + 64U + row * 2U + 1U] = 255U;
+    bridge_ppu.vram[unwrapped_map_byte + 16U * 2U] = 2U;
+    for (const auto width : {400U, 796U}) {
+        starfox::render::Framebuffer bridge_frame{width, 8U};
+        bridge_frame.clear(42U);
+        const auto origin = static_cast<int>((width - 256U) / 2U);
+        background_renderer.draw_bg2(bridge_ppu, 0, 0, bridge_frame,
+            starfox::render::TilePriorityPass::all, origin, true);
+        for (unsigned x = 0; x < width; ++x) {
+            const bool bridge = x >= static_cast<unsigned>(origin + 128)
+                && x < static_cast<unsigned>(origin + 136);
+            require(bridge_frame.get(x, 0) == (bridge ? 2U : 1U),
+                "water bridge repeated outside its single centred cross-section");
+        }
+    }
+    auto open_water_ppu = bridge_ppu;
+    // Unique planet ink may share tiles/rows with repeating cloud colours.
+    auto unique_sky_ppu = bridge_ppu;
+    unique_sky_ppu.bg2_scanline_scroll_enabled = false;
+    unique_sky_ppu.vram[unwrapped_map_byte + 17U * 2U] = 3U;
+    for (unsigned row = 0; row < 8U; ++row) {
+        unique_sky_ppu.vram[bridge_chars + 96U + row * 2U] = 255U;
+        unique_sky_ppu.vram[bridge_chars + 97U + row * 2U] = 255U;
+    }
+    constexpr starfox::render::BackgroundUniqueRegion unique_sky_region{
+        128, 0, 144, 8, 2, 2, 1};
+    for (const auto width : {256U, 400U, 800U}) {
+      for (const auto scroll : {0, -1, 8191}) {
+        const auto origin = static_cast<int>((width - 256U) / 2U);
+        starfox::render::Framebuffer sky_frame{width, 8U};
+        background_renderer.draw_bg2(unique_sky_ppu, scroll, 0, sky_frame,
+            starfox::render::TilePriorityPass::all, origin, true, true, false,
+            0U, std::span{&unique_sky_region, 1U});
+        for (int x = 0; x < static_cast<int>(width); ++x) {
+            const auto source_x = ((x - origin + scroll) % 256 + 256) % 256;
+            const auto canonical_x = x - origin + (scroll == 0 ? 0 : -1);
+            const auto expected = source_x >= 136 && source_x < 144 ? 3U
+                : canonical_x >= 128 && canonical_x < 136 ? 2U : 1U;
+            require(sky_frame.get(x, 0) == expected,
+                "unique sky artwork duplicated, removed native ink, or erased repeating clouds");
+        }
+      }
+    }
+    open_water_ppu.background_mode = 2U;
+    starfox::render::Framebuffer open_water_frame{800U, 8U};
+    background_renderer.draw_bg2(open_water_ppu, 0, 0, open_water_frame,
+        starfox::render::TilePriorityPass::all, 272, true);
+    require(open_water_frame.get(144, 0) == 2U
+                && open_water_frame.get(400, 0) == 2U
+                && open_water_frame.get(656, 0) == 2U,
+        "Mode 2 open-water scenery incorrectly inherited Mode 1 bridge clamping");
     tunnel_ppu.tunnel_scene = true;
     for (const auto width : {400U, 796U}) {
         starfox::render::Framebuffer tunnel_frame{width, 8U};
@@ -334,6 +465,22 @@ int main(int argc, char** argv) {
             }
         }
     }
+
+    // A colored closed wall must not inherit unrelated black CGRAM entries.
+    starfox::simulation::SnesPpuState colored_tunnel;
+    colored_tunnel.main_screen=2;colored_tunnel.tunnel_scene=true;
+    colored_tunnel.background_mode=1;
+    colored_tunnel.bg2_screen_base=0x7000;
+    colored_tunnel.bg2_character_base=0x5000;
+    colored_tunnel.cgram[1]=0x1846;
+    for(unsigned y=0;y<8;++y) colored_tunnel.vram[0xa000+y*2]=255;
+    require(starfox::render::tunnel_wall_index(colored_tunnel)==1,
+        "colored tunnel wall was replaced with unrelated palette black");
+    starfox::render::Framebuffer colored_wide{800,224};
+    background_renderer.draw_bg2(colored_tunnel,0,0,colored_wide,
+        starfox::render::TilePriorityPass::all,272,true);
+    require(colored_wide.get(0,112)==1 && colored_wide.get(799,112)==1,
+        "colored tunnel margins failed to match the native wall");
 
     starfox::simulation::SnesPpuState tall_bg_ppu;
     tall_bg_ppu.main_screen = 0x02U;
@@ -399,6 +546,16 @@ int main(int argc, char** argv) {
             "Mode 2 edge guard exposed an unshifted left raster strip");
 
     auto wide_slope_ppu = mode2_edge_ppu;
+    auto scanline_and_tile_ppu = mode2_edge_ppu;
+    scanline_and_tile_ppu.bg2_scanline_scroll_enabled = true;
+    scanline_and_tile_ppu.bg2_scanline_scroll_y.fill(0);
+    scanline_and_tile_ppu.vram[mode2_map + 2U * 2U] = 1U;
+    starfox::render::Framebuffer scanline_and_tile_frame{24U, 1U};
+    background_renderer.draw_bg2(scanline_and_tile_ppu, 0, 24,
+        scanline_and_tile_frame);
+    require(scanline_and_tile_frame.get(8, 0) == 3U
+                && scanline_and_tile_frame.get(16, 0) == 1U,
+        "Mode 2 tile offset failed to override scanline VOFS or invalid entry lost VOFS");
     wide_slope_ppu.bg2_screen_size = 0U;
     wide_slope_ppu.vram[mode2_offset] = 8U;
     wide_slope_ppu.vram[mode2_offset + 1U] = 0x40U;
@@ -1206,9 +1363,152 @@ int main(int argc, char** argv) {
     require(near_registers.a == 0x5678U && near_instructions == 2U,
             "native 65C816 bridge did not execute a same-bank RTS routine exactly");
 
+    cpu.write16(0x7e0100U,0x1234U);
+    cpu.write16(0x700100U,0xabcdU);
+    cpu.write16(0x710100U,0x5678U);
+    cpu.write8(0x7effffU,0xaaU);
+    cpu.write8(0x7f0000U,0xbbU);
+    const auto before_ram_peeks=cpu.save_state();
+    require(cpu.peek_ram16(0x000100U)==0x1234U && cpu.peek_ram16(0x800100U)==0x1234U
+            && cpu.peek_ram16(0x700100U)==0xabcdU && cpu.peek_ram16(0x710100U)==0x5678U
+            && cpu.peek_ram16(0x7effffU)==0xbbaaU,
+        "presentation RAM peeks differ from mapped source memory");
+    require(!cpu.peek_ram16(0x001fffU) && !cpu.peek_ram8(0x00213fU)
+            && !cpu.peek_ram8(0x002140U) && !cpu.peek_ram8(0x008000U)
+            && !cpu.peek_ram16(0xffffffffU) && !cpu.peek_ram16(0x71ffffU),
+        "presentation RAM peeks accepted I/O, ROM or invalid word boundaries");
+    require(cpu.save_state()==before_ram_peeks,
+        "presentation RAM peeks changed bus state or I/O latches");
+
     if (argc == 3) {
         const auto upstream_rom = starfox::assets::RomImage::load(argv[1]);
         const auto upstream_symbols = starfox::assets::SymbolMap::load(argv[2]);
+        {
+            starfox::simulation::Wdc65816 background_cpu{upstream_rom,&upstream_symbols};
+            background_cpu.write8(0x2105U,2U);
+            const auto flag=upstream_symbols.find("INATUNNEL").at(0);
+            const auto mode=upstream_symbols.find("HPOSJMP").at(0);
+            const auto bg3_flag=upstream_symbols.find("BG3SCROLLFLAG").at(0);
+            const auto bg3_saved=upstream_symbols.find("BG3SCROLL").at(0);
+            for(const auto scroll:{std::int16_t(-4100),std::int16_t(-4),std::int16_t(0),std::int16_t(4091)}) {
+                background_cpu.write8(0U,0U);
+                background_cpu.write8(bg3_flag,1U);
+                background_cpu.write16(bg3_saved,static_cast<std::uint16_t>(scroll));
+                background_cpu.tick_background_video_phase();
+                require(background_cpu.ppu_state().bg3_scroll_x==scroll,
+                    "FOXIRQ3 did not publish saved signed BG3 scroll");
+                background_cpu.write16(bg3_saved,123U);
+                background_cpu.write8(bg3_flag,0U);
+                background_cpu.tick_background_video_phase();
+                require(background_cpu.ppu_state().bg3_scroll_x==scroll,
+                    "disabled BG3 scroll changed the PPU register");
+                background_cpu.write8(bg3_flag,1U);
+                background_cpu.write8(0U,32U);
+                background_cpu.tick_background_video_phase();
+                require(background_cpu.ppu_state().bg3_scroll_x==scroll,
+                    "gameplay BG3 scroll overwrote ending presentation");
+            }
+            background_cpu.write8(0U,0U);
+            background_cpu.write8(bg3_flag,0U);
+            {
+                starfox::simulation::Wdc65816 source_cpu{upstream_rom,&upstream_symbols};
+                // IRQ helpers execute from relocated WRAM. A bare CPU has no
+                // copy of that code; obtain it through normal source startup.
+                starfox::simulation::GameSimulation code_game{
+                    upstream_rom,upstream_symbols,"LEVEL2_6",{},true};
+                for(unsigned i=0;i<1000;++i) static_cast<void>(code_game.tick({}));
+                for(std::uint32_t address=0x7e2000U;address<0x7e8000U;++address)
+                    source_cpu.write8(address,code_game.map().peek_ram_byte(address).value());
+                const auto override_flag=upstream_symbols.find("BG2VOFSOVERRIDE").at(0);
+                const auto requested_x=upstream_symbols.find("BG2HOFSREQ").at(0);
+                const auto requested_y=upstream_symbols.find("BG2VOFSREQ").at(0);
+                for(const auto value:{0U,127U,256U,8191U}) {
+                    for(auto* test_cpu:{&background_cpu,&source_cpu}) {
+                        test_cpu->write8(override_flag,1U);
+                        test_cpu->write16(requested_x,static_cast<std::uint16_t>(value));
+                        test_cpu->write16(requested_y,static_cast<std::uint16_t>(8191U-value));
+                    }
+                    starfox::simulation::Wdc65816Registers registers{};
+                    registers.status=0x24U;
+                    source_cpu.call_near(upstream_symbols.find("SETBG2VOFS").at(0),registers);
+                    background_cpu.tick_background_video_phase();
+                    require(background_cpu.ppu_state().bg2_scroll_x==source_cpu.ppu_state().bg2_scroll_x
+                        && background_cpu.ppu_state().bg2_scroll_y==source_cpu.ppu_state().bg2_scroll_y,
+                        "background scroll override differs from native SETBG2VOFS");
+                }
+                const auto retained_x=background_cpu.ppu_state().bg2_scroll_x;
+                const auto retained_y=background_cpu.ppu_state().bg2_scroll_y;
+                background_cpu.write8(override_flag,0U);
+                background_cpu.write16(requested_x,31U);
+                background_cpu.write16(requested_y,63U);
+                background_cpu.tick_background_video_phase();
+                require(background_cpu.ppu_state().bg2_scroll_x==retained_x
+                    && background_cpu.ppu_state().bg2_scroll_y==retained_y,
+                    "disabled scroll override published requested values");
+                background_cpu.write8(override_flag,1U);
+                background_cpu.write8(0U,32U);
+                background_cpu.tick_background_video_phase();
+                require(background_cpu.ppu_state().bg2_scroll_x==retained_x
+                    && background_cpu.ppu_state().bg2_scroll_y==retained_y,
+                    "gameplay scroll override overwrote ending presentation");
+                background_cpu.write8(0U,0U);
+                background_cpu.write8(override_flag,0U);
+            }
+            for(const auto* name:{"ROTATE_HOF","TUNNEL1_HOF","TUNNEL2_HOF","TUNNEL3_HOF","NOGRAD_HOF"}) {
+                background_cpu.write8(mode,static_cast<std::uint8_t>(upstream_symbols.find(name).at(0)));
+                for(unsigned value:{0U,1U,2U}) {
+                    background_cpu.write8(flag,static_cast<std::uint8_t>(value));
+                    background_cpu.tick_background_video_phase();
+                    const auto metadata_state = background_cpu.save_state();
+                    background_cpu.refresh_background_metadata();
+                    require(background_cpu.save_state() == metadata_state,
+                        "background metadata refresh changed source state or scroll timing");
+                    require(background_cpu.ppu_state().tunnel_scene
+                        == (value==1U && std::string_view{name}!="ROTATE_HOF"),
+                        "underground landscape/water misclassified as a closed tunnel");
+                }
+            }
+        }
+        {
+            starfox::simulation::GameSimulation bg3_game{
+                upstream_rom,upstream_symbols,"LEVEL2_6",{},true};
+            for(unsigned i=0;i<1000;++i) static_cast<void>(bg3_game.tick({}));
+            // Compare the live colony tunnel transfer against the cartridge
+            // archives before diagnosing any widescreen sampling behaviour.
+            const auto tunnel_chars=starfox::assets::decrunch_reverse(
+                upstream_rom,upstream_symbols.find("BGCMCCR").at(0)).bytes;
+            const auto tunnel_map=starfox::assets::decrunch_reverse(
+                upstream_rom,upstream_symbols.find("BGTSSPCR").at(0)).bytes;
+            const auto character_address=upstream_symbols.find("VCHR_LOGBACK").at(0)*2U;
+            const auto screen_address=upstream_symbols.find("VSC_BASE2").at(0)*2U;
+            const auto screen_offset=upstream_symbols.find("SCR_OFFSET").at(0);
+            const auto& tunnel_vram=bg3_game.map().ppu_state().vram;
+            require(std::equal(tunnel_chars.begin(),tunnel_chars.end(),tunnel_vram.begin()+character_address),
+                "colony tunnel live character transfer differs from cartridge archive");
+            for(std::size_t i=0;i+1<tunnel_map.size();i+=2) {
+                const auto expected=static_cast<std::uint16_t>((tunnel_map[i]|(tunnel_map[i+1]<<8U))+screen_offset);
+                const auto actual=static_cast<std::uint16_t>(tunnel_vram[(screen_address+i)&0xffffU]
+                    |(tunnel_vram[(screen_address+i+1)&0xffffU]<<8U));
+                require(actual==expected,"colony tunnel live tilemap transfer differs from cartridge archive");
+            }
+            const auto flag=upstream_symbols.find("BG3SCROLLFLAG").at(0);
+            const auto saved=upstream_symbols.find("BG3SCROLL").at(0);
+            const auto viewpt=upstream_symbols.find("VIEWPT").at(0);
+            for(const int x:{-32768,-9,-1,0,7,8,32767}) {
+                const auto view=bg3_game.map().read_native_word(viewpt);
+                bg3_game.map().write_native_word(static_cast<std::uint16_t>(view+12U),static_cast<std::uint16_t>(x));
+                bg3_game.map().write_native_byte(flag,1U);
+                static_cast<void>(bg3_game.tick({}));
+                const int expected=(x<0?-((-x+7)/8):x/8)-4;
+                require(bg3_game.map().read_native_word(saved)==static_cast<std::uint16_t>(expected),
+                    "TRANSFER_L did not snapshot signed camera BG3 scroll before strategies");
+            }
+            bg3_game.map().write_native_byte(flag,0U);
+            bg3_game.map().write_native_word(saved,1234U);
+            static_cast<void>(bg3_game.tick({}));
+            require(bg3_game.map().read_native_word(saved)==1234U,
+                "disabled BG3 transfer changed saved scroll");
+        }
         {
             starfox::simulation::GameSimulation scramble{
                 upstream_rom, upstream_symbols, "LEVEL1_1", {}, true};
@@ -1288,6 +1588,40 @@ int main(int argc, char** argv) {
                 if (std::string_view{test.entry} == "PLANETSELECT") {
                     require(first_started_frame && *first_started_frame == 0U,
                         "MSU map track did not begin on its first fade raster");
+                }
+            }
+        }
+
+        // MTUNNELGRAD (MHOFS.MC): four times VIEWPOSX plus its signed
+        // quarter, wrapped to a word, accumulated as signed 8.8 fixed point.
+        // Check the complete input domain, including negative/overflow cases,
+        // independently of the host's split integer/fraction accumulator.
+        {
+            starfox::simulation::Wdc65816 offsets_cpu{upstream_rom, &upstream_symbols};
+            const auto entry = upstream_symbols.find("MTUNNELGRAD").front();
+            const auto position = upstream_symbols.find("M_VIEWPOSX").front();
+            const auto buffer = upstream_symbols.find("BG_SCROLLBUFFER").front();
+            const auto floor_div = [](int value, int divisor) {
+                return value >= 0 ? value / divisor : -((-value + divisor - 1) / divisor);
+            };
+            for (unsigned word = 0; word < 65536U; ++word) {
+                offsets_cpu.write16(position, static_cast<std::uint16_t>(word));
+                offsets_cpu.write8(0x003034U, static_cast<std::uint8_t>(entry >> 16U));
+                offsets_cpu.write8(0x00301eU, static_cast<std::uint8_t>(entry));
+                offsets_cpu.write8(0x00301fU, static_cast<std::uint8_t>(entry >> 8U));
+                const int signed_position = word < 32768U ? int(word) : int(word) - 65536;
+                const auto packed = static_cast<std::uint16_t>(
+                    signed_position * 4 + floor_div(signed_position, 4));
+                const int gradient = packed < 32768U ? int(packed) : int(packed) - 65536;
+                for (unsigned row = 0; row < 112U; ++row) {
+                    const auto expected = static_cast<std::uint16_t>(
+                        128 + floor_div(gradient * int(row + 1U), 256));
+                    for (const unsigned line : {111U - row, 112U + row}) {
+                        const auto record = buffer + line * 3U;
+                        require(offsets_cpu.read8(record) == 1U
+                                    && offsets_cpu.read16(record + 1U) == expected,
+                            "MTUNNELGRAD differs from source fixed-point scanline arithmetic");
+                    }
                 }
             }
         }
@@ -3181,6 +3515,35 @@ int main(int argc, char** argv) {
             require((god_game.map().read_native_byte(ship_flags_3) & 0x08U) == 0U
                         && god_game.map().read_native_word(bomb_count) == 1U,
                     "disabled God Mode restored collision immunity or infinite bombs next tick");
+            god_game.set_infinite_bombs(true);
+            god_game.set_infinite_boost(true);
+            god_game.set_default_laser(2U);
+            const auto boost_meter = upstream_symbols.find("M_BOOSTANIM").front();
+            const auto ship_flags_2 = upstream_symbols.find("PSHIPFLAGS2").front();
+            god_game.map().write_native_byte(boost_meter, 0U);
+            static_cast<void>(god_game.tick({}));
+            require(god_game.map().read_native_word(bomb_count) >= 3U
+                        && god_game.map().read_native_byte(boost_meter) == 40U
+                        && (god_game.map().read_native_byte(ship_flags_3) & 0x08U) == 0U,
+                    "resource cheats failed or enabled collision immunity");
+            require((god_game.map().read_native_byte(ship_flags_2) & 1U) != 0U
+                        && (god_game.map().read_native_byte(ship_flags_3) & 16U) != 0U,
+                    "fully upgraded starting laser did not set native weapon flags");
+            god_game.map().write_native_byte(ship_flags_2, static_cast<std::uint8_t>(
+                god_game.map().read_native_byte(ship_flags_2) & ~1U));
+            god_game.map().write_native_byte(ship_flags_3, static_cast<std::uint8_t>(
+                god_game.map().read_native_byte(ship_flags_3) & ~16U));
+            god_game.set_infinite_bombs(false);
+            god_game.set_infinite_boost(false);
+            god_game.map().write_native_word(bomb_count, 1U);
+            god_game.map().write_native_byte(boost_meter, 0U);
+            static_cast<void>(god_game.tick({}));
+            require(god_game.map().read_native_word(bomb_count) == 1U
+                        && god_game.map().read_native_byte(boost_meter) < 40U
+                        && (god_game.map().read_native_byte(ship_flags_2) & 1U) == 0U
+                        && (god_game.map().read_native_byte(ship_flags_3) & 16U) == 0U,
+                    "disabled resource cheats persisted or starting laser became a permanent lock");
+            god_game.set_default_laser(0U);
             god_game.set_god_mode(true);
             require(god_game.god_mode()
                         && (god_game.map().read_native_byte(ship_flags_3) & 0x08U) != 0U
@@ -3246,7 +3609,16 @@ int main(int argc, char** argv) {
             auto& nuke_object = god_game.objects().at(armed_nuke);
             nuke_object.shape = null_shape;
             nuke_object.strategy_address = nuke_explosion;
+            const auto protected_player = god_game.player();
+            const auto protected_health = god_game.objects().at(protected_player).health;
+            if (starfox_ex_cartridge) {
+                god_game.map().write_native_byte(upstream_symbols.find("GODMODE").front(), 0U);
+            }
             static_cast<void>(god_game.tick({}));
+            require(god_game.god_mode()
+                        && god_game.objects().is_active(protected_player)
+                        && god_game.objects().at(protected_player).health == protected_health,
+                    "God Nuke damaged its player after EX disabled the native God Mode flag");
             require(god_game.objects().is_active(target)
                         && god_game.objects().at(target).health == 0U
                         && (god_game.objects().at(target).strategy_flags[1]
@@ -3792,6 +4164,31 @@ int main(int argc, char** argv) {
                     previous_wipe, current_wipe, 0.5).active,
                 "completed window wipe was incorrectly held for interpolation");
 
+        auto shutter=previous_wipe;
+        for(unsigned y=80;y<112;++y) {shutter.left[y]=15;shutter.right[y]=16;}
+        const auto quarter_shutter=starfox::simulation::interpolate_window_wipe(previous_wipe,shutter,.25);
+        require(quarter_shutter.horizontal_opening && quarter_shutter.opening_top==92.0
+            && quarter_shutter.opening_bottom==100.0,
+            "scramble shutter interpolated X slits instead of moving horizontal edges");
+        auto last_top=96.0;
+        for(unsigned phase=1;phase<=12;++phase) {
+            const auto smooth=starfox::simulation::interpolate_window_wipe(previous_wipe,shutter,phase/12.0);
+            require(smooth.horizontal_opening && smooth.opening_top<last_top
+                && smooth.left==shutter.left && smooth.right==shutter.right,
+                "240 FPS shutter lost sub-source-frame motion or generated partial row bounds");
+            last_top=smooth.opening_top;
+        }
+        auto split_shutter=shutter;
+        const auto finishing=starfox::simulation::interpolate_window_wipe(shutter,current_wipe,.5);
+        require(finishing.active && finishing.horizontal_opening
+            && finishing.opening_top==40.0 && finishing.opening_bottom==152.0,
+            "scramble completion jumped directly to unmasked output");
+        require(!starfox::simulation::interpolate_window_wipe(shutter,current_wipe,1.0).active,
+            "scramble completion retained its mask after the interpolation interval");
+        split_shutter.left[96]=16;split_shutter.right[96]=239;
+        require(!starfox::simulation::interpolate_window_wipe(previous_wipe,split_shutter,.5).horizontal_opening,
+            "noncontiguous wipe was incorrectly treated as the scramble shutter");
+
         const auto send_message = upstream_symbols.find("SEND_MESSAGE_L");
         require(!send_message.empty(), "SEND_MESSAGE_L symbol is missing");
         starfox::simulation::Wdc65816Registers message_registers;
@@ -3830,6 +4227,36 @@ int main(int argc, char** argv) {
                     && dialogue.text_address != 0U
                     && game.map().unknown_superfx_launches().empty(),
                 "original teammate communication state was not presented");
+        const auto friend_address=upstream_symbols.find("WHICHFRIEND").front();
+        const auto meter_address=upstream_symbols.find("FRIENDS_METER").front();
+        const auto opening_address=upstream_symbols.find("MSG_COUNT2").front();
+        const auto count_address=upstream_symbols.find("MSG_COUNT1").front();
+        const auto saved_friend=game.map().read_native_byte(friend_address);
+        const auto saved_meter=game.map().read_native_byte(meter_address);
+        const auto saved_opening=game.map().read_native_byte(opening_address);
+        const auto saved_count=game.map().read_native_byte(count_address);
+        game.map().write_native_byte(friend_address,1);
+        game.map().write_native_byte(opening_address,5);
+        game.map().write_native_byte(count_address,20);
+        game.map().write_native_byte(meter_address,0);
+        require(!game.dialogue_state().meter_visible,
+            "ordinary teammate message displayed a health meter");
+        game.map().write_native_byte(meter_address,0xa8);
+        require(game.dialogue_state().meter_visible && game.dialogue_state().meter_health==40
+            && game.dialogue_state().three_lines,
+            "source-requested teammate meter or raised text layout was lost");
+        game.map().write_native_byte(opening_address,4);
+        require(!game.dialogue_state().meter_visible,"meter appeared during portrait opening");
+        game.map().write_native_byte(opening_address,5);
+        game.map().write_native_byte(count_address,0);
+        require(!game.dialogue_state().meter_visible,"meter remained during portrait closing");
+        game.map().write_native_byte(count_address,20);
+        game.map().write_native_byte(friend_address,0);
+        require(!game.dialogue_state().meter_visible,"Fox inherited a teammate meter");
+        game.map().write_native_byte(friend_address,saved_friend);
+        game.map().write_native_byte(meter_address,saved_meter);
+        game.map().write_native_byte(opening_address,saved_opening);
+        game.map().write_native_byte(count_address,saved_count);
         const auto dialogue_game_flags =
             upstream_symbols.find("GAMEFLAGS").front();
         const auto flags_before_dialogue_death =
@@ -5464,7 +5891,7 @@ int main(int argc, char** argv) {
             starfox::simulation::GameSimulation regional_controls{
                 upstream_rom, upstream_symbols, "CONTMAP"};
             const auto initial=regional_controls.map().ppu_state().cgram;
-            for (std::uint8_t language=1;language<=4;++language) {
+            for (std::uint8_t language=1;language<=5;++language) {
                 regional_controls.set_language(language);
                 const auto expected=upstream_symbols.find("BG2EPPAC").front();
                 for (unsigned index=0;index<112;++index)
@@ -6294,7 +6721,31 @@ int main(int argc, char** argv) {
                         == static_cast<std::uint8_t>(
                             upstream_symbols.find("TITLEMAP").front() >> 16U),
                 "attract-mode input did not return to the title map");
+        require(attract_game.draw_order().empty(),
+                "intro-to-title handoff exposed INITGAME's temporary player before a title transfer");
 
+        {
+            starfox::simulation::GameSimulation level_cheat{upstream_rom, upstream_symbols, "BOOT"};
+            require(level_cheat.selected_level() == 0U && level_cheat.default_laser() == 0U
+                && !level_cheat.infinite_bombs() && !level_cheat.infinite_boost(),
+                "new cheats must default off");
+            level_cheat.set_selected_level(99U);
+            require(level_cheat.selected_level() == 0U, "invalid level selection was accepted");
+            level_cheat.set_selected_level(21U);
+            require(level_cheat.selected_level_name() == "LEVEL2_1", "route/stage selection was lost");
+            level_cheat.set_default_laser(1U);
+            static_cast<void>(level_cheat.tick({0, starfox::input::start, 0}));
+            for (unsigned i = 0; i < 60U && level_cheat.flow_state()
+                    == starfox::simulation::GameFlowState::pregame_menu; ++i)
+                static_cast<void>(level_cheat.tick({}));
+            require(level_cheat.flow_state() == starfox::simulation::GameFlowState::gameplay,
+                "level cheat did not launch gameplay after the menu fade");
+            require(level_cheat.map().read_native_byte(upstream_symbols.find("CURRENTLEVEL").front()) == 1U,
+                "level cheat launched with the wrong route state");
+            static_cast<void>(level_cheat.tick({}));
+            require((level_cheat.map().read_native_byte(upstream_symbols.find("PSHIPFLAGS2").front()) & 1U) != 0U,
+                "level select lost its default laser upgrade");
+        }
         const auto select_menu_action = [](starfox::simulation::GameSimulation& menu,
             starfox::simulation::PregamePage page, unsigned action,
             starfox::audio::Spc700Audio* audio = nullptr) {
@@ -6628,12 +7079,15 @@ int main(int argc, char** argv) {
         }
         drive_boot({0, starfox::input::left, 0});
         require(boot_game.hdr_effect() == 3U, "HDR menu did not cycle backwards");
-        select_menu_action(boot_game, starfox::simulation::PregamePage::three_d, 26U, &boot_audio);
-        require(!boot_game.enhanced_shadows(), "enhanced shadows must default Off");
+        const auto shadow_menu = starfox::simulation::pregame_menu_order(starfox::simulation::PregamePage::three_d);
+        require(std::find(shadow_menu.begin(),shadow_menu.end(),26U)==shadow_menu.end(),
+            "removed Enhanced Shadows option remains in menu navigation");
+        select_menu_action(boot_game, starfox::simulation::PregamePage::three_d, 29U, &boot_audio);
+        require(!boot_game.ray_tracing(), "hardware ray tracing must default Off");
         drive_boot({0, starfox::input::a, 0});
-        require(boot_game.enhanced_shadows(), "enhanced shadow menu did not enable");
+        require(boot_game.ray_tracing(), "ray tracing must enable enhanced shadows");
         drive_boot({0, starfox::input::left, 0});
-        require(!boot_game.enhanced_shadows(), "enhanced shadow menu did not restore original shadows");
+        require(!boot_game.ray_tracing(), "ray tracing did not toggle back Off");
         select_menu_action(boot_game, starfox::simulation::PregamePage::three_d, 27U, &boot_audio);
         require(boot_game.chromatic_aberration() == 0U, "chromatic aberration must default Off");
         for (unsigned level=1; level<=4; ++level) {
@@ -6683,9 +7137,60 @@ int main(int argc, char** argv) {
                     == starfox::simulation::PregamePage::options
                     && boot_game.pregame_selection() == 0U,
                 "OPTIONS did not open its second pre-game page");
+        select_menu_action(boot_game, starfox::simulation::PregamePage::options, 9U, &boot_audio);
+        require(boot_game.stereo_output()==0U,"Stereo output did not default OFF");
+        drive_boot({0, starfox::input::left, 0});
+        require(boot_game.stereo_output()==2U,"Stereo output did not wrap left to Full SBS");
+        drive_boot({0, starfox::input::right, 0});
+        require(boot_game.stereo_output()==0U,"Stereo output did not wrap right to OFF");
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.stereo_output()==1U,"Stereo confirmation did not select Half SBS");
+        boot_game.set_stereo_output(0);
+        select_menu_action(boot_game, starfox::simulation::PregamePage::options, 12U, &boot_audio);
+        boot_game.set_language(0);
+        drive_boot({0, starfox::input::left, 0});
+        require(boot_game.language()==5U,"English did not wrap left to English Europe");
+        drive_boot({0, starfox::input::right, 0});
+        require(boot_game.language()==0U,"English Europe did not wrap right to English");
+        boot_game.set_language(4);
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.language()==5U,"Language confirmation skipped English Europe");
+        boot_game.set_language(0);
+        select_menu_action(boot_game, starfox::simulation::PregamePage::options, 0U, &boot_audio);
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.pregame_page() == starfox::simulation::PregamePage::cheats,
+                "OPTIONS did not open CHEATS");
         drive_boot({0, starfox::input::a, 0});
         require(boot_game.god_mode(),
-                "God Mode could not be enabled from OPTIONS");
+                "God Mode could not be enabled from CHEATS");
+        drive_boot({0, starfox::input::down, 0});
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.selected_level() == 11U, "level selector did not reach LEVEL1_1");
+        drive_boot({0, starfox::input::left, 0});
+        require(boot_game.selected_level() == 0U, "level selector did not return to ordinary boot");
+        drive_boot({0, starfox::input::down, 0});
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.default_laser() == 1U, "default laser did not reach dual");
+        drive_boot({0, starfox::input::left, 0});
+        drive_boot({0, starfox::input::down, 0});
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.infinite_bombs(), "infinite bombs did not enable");
+        drive_boot({0, starfox::input::a, 0});
+        drive_boot({0, starfox::input::down, 0});
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.infinite_boost(), "infinite boost did not enable");
+        drive_boot({0, starfox::input::a, 0});
+        drive_boot({0, starfox::input::down, 0});
+        drive_boot({0, starfox::input::a, 0});
+        require(boot_game.infinite_lives(), "infinite lives did not enable");
+        drive_boot({0, starfox::input::a, 0});
+        drive_boot({0, starfox::input::down, 0});
+        drive_boot({starfox::input::a, starfox::input::a, 0});
+        drive_boot({starfox::input::a, starfox::input::a, 0});
+        require(boot_game.pregame_page() == starfox::simulation::PregamePage::options
+                    && boot_game.pregame_selection() == 0U,
+                "held A leaked across CHEATS Back");
+        drive_boot({});
         drive_boot({0, starfox::input::down, 0});
         require(boot_game.pregame_selection() == 1U,
                 "pre-game cursor did not reach ON-SCREEN FPS");
@@ -7304,7 +7809,34 @@ int main(int argc, char** argv) {
         require(!starfox_message.empty(), "MSG_STARFOX symbol is missing");
         starfox::render::ScaledTextRenderer text_renderer{
             upstream_rom, upstream_symbols};
+        for(unsigned scale:{1U,2U,4U,10U}) {
+            starfox::render::Framebuffer source_face{32,40};
+            text_renderer.draw_face(7,0,0,source_face);
+            starfox::render::Framebuffer corrected_face{64,50,scale};
+            text_renderer.draw_face(7,10,5,corrected_face,112,false,true);
+            const auto edge=[scale](unsigned x) {return (x*scale*7+3)/6;};
+            const auto left=42*scale-edge(32);
+            for(unsigned sy=0;sy<50*scale;++sy) for(unsigned sx=0;sx<64*scale;++sx) {
+                unsigned expected=0;
+                if(sy>=5*scale && sy<45*scale && sx>=left && sx<42*scale) {
+                    unsigned source_x=0;
+                    while(source_x<31 && left+edge(source_x+1)<=sx) ++source_x;
+                    expected=source_face.get(source_x,sy/scale-5);
+                }
+                require(corrected_face.get_stored(sx,sy)==expected,
+                    "widescreen portrait aspect correction changed source pixels, height or right edge");
+            }
+        }
         starfox::render::Framebuffer compact_text{256, 224};
+        text_renderer.draw_ascii(":",10,10,compact_text);
+        require(text_renderer.measure_ascii(":")==5,"host colon advance mismatch");
+        for(int row=0;row<12;++row) for(int column=0;column<5;++column) {
+            const bool expected=(column==1 || column==2)
+                && (row==3 || row==4 || row==8 || row==9);
+            require((compact_text.get(10+column,10+row)!=0)==expected,
+                "host colon must use two separated dots, not a ROM alias");
+        }
+        compact_text.clear(0U);
         text_renderer.draw_ascii_compact("/", 10, 10, compact_text);
         require(text_renderer.measure_ascii("/") == 5
                 && compact_text.get(13, 10) != 0U
@@ -7439,6 +7971,28 @@ int main(int argc, char** argv) {
         starfox::render::Framebuffer grid_frame{224, 192};
         const auto identity = starfox::simulation::rotation_matrix_q15(
             trig, 0, 0, 0);
+        starfox::simulation::DustSystem margin_dust;
+        margin_dust.tick({0,0,0}, identity, true);
+        for (const auto scale : {1U,2U,4U}) {
+            starfox::render::Framebuffer all_stars{400,224}, margin_stars{400,224};
+            all_stars.set_draw_scale(scale);
+            margin_stars.set_draw_scale(scale);
+            all_stars.resize(400,224);
+            margin_stars.resize(400,224);
+            margin_stars.clear(9U);
+            dot_renderer.draw(margin_dust, starfox::simulation::kNormalDustPoints, {}, identity, all_stars);
+            dot_renderer.draw(margin_dust, starfox::simulation::kNormalDustPoints, {}, identity, margin_stars, 0,0,72,328);
+            unsigned margin_count{};
+            for (unsigned y=0;y<224*scale;++y) for(unsigned x=0;x<400*scale;++x) {
+                const auto i=y*400*scale+x;
+                const auto expected = x>=72*scale && x<328*scale ? 9U
+                    : all_stars.pixels()[i] != 0U ? all_stars.pixels()[i] : 9U;
+                require(margin_stars.pixels()[i] == expected,
+                    "Game Over star extension overwrote native art or changed star projection");
+                if ((x<72*scale || x>=328*scale) && all_stars.pixels()[i] != 0U) ++margin_count;
+            }
+            require(margin_count>0U,"Game Over margin fixture contained no stars");
+        }
         dot_renderer.draw_grid({0.0, -256.0, 0.0, 0.0, 0.0, 0.0},
             identity, grid_frame);
         require(std::count(grid_frame.pixels().begin(), grid_frame.pixels().end(),

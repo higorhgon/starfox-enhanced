@@ -1,4 +1,7 @@
 #include "starfox/simulation/map_vm.hpp"
+#include "starfox/assets/bps.hpp"
+#include "starfox/state/archive.hpp"
+#include "starfox/state/container.hpp"
 
 #include "starfox/simulation/math.hpp"
 
@@ -93,6 +96,7 @@ MapVm::MapVm(
     const assets::SymbolMap* symbols)
     : rom_(&rom),
       database_(database),
+      state_symbols_(symbols),
       objects_(&objects),
       object_base_(static_cast<std::uint16_t>(
           symbol_or(symbols, "ALBLKS", kOriginalObjectBase))),
@@ -161,6 +165,49 @@ MapVm::MapVm(
             }
         }
     }
+}
+
+template<class Archive,class Self>
+void MapVm::transfer_state(Archive& archive,Self& self) {
+    archive(self.player_,self.last_spawned_,self.cursor_,self.countdown_,
+        self.last_player_z_,self.ended_,self.background_music_,self.other_music_,
+        self.background_,self.stage_counter_,self.dots_mode_,self.fade_direction_,
+        self.fade_value_,self.display_brightness_,self.vertical_offset_enabled_,
+        self.horizontal_offset_enabled_,self.z_rotation_enabled_,self.screen_enabled_,
+        self.background_request_pending_,self.messages_,self.call_stack_,
+        self.loop_counters_,self.native_memory_,self.unknown_condition_result_,self.unsupported_controls_);
+}
+
+std::vector<std::uint8_t> MapVm::save_state() const {
+    state::Writer archive;
+    transfer_state(archive,*this);
+    archive(cpu_.save_state());
+    return state::pack(0x4d415001U,assets::crc32(rom_->bytes()),archive.bytes());
+}
+
+void MapVm::load_state(std::span<const std::uint8_t> bytes) {
+    const auto payload=state::unpack(bytes,0x4d415001U,assets::crc32(rom_->bytes()));
+    MapVm restored{*rom_,database_,*objects_,state_symbols_};
+    // Diagnostic condition callbacks are process-local configuration. Keep
+    // them bound rather than trying to persist executable closures.
+    restored.conditions_=conditions_;
+    state::Reader archive{payload};
+    transfer_state(archive,restored);
+    std::vector<std::uint8_t> cpu_state;
+    archive(cpu_state);
+    archive.finish();
+    if(restored.player_>objects_->capacity() || restored.last_spawned_>objects_->capacity()
+        || restored.cursor_>=0x1000000U || restored.display_brightness_>15U)
+        throw std::runtime_error{"invalid saved map state"};
+    for(const auto address:restored.call_stack_) if(address>=0x1000000U)
+        throw std::runtime_error{"invalid saved map return address"};
+    for(const auto& [address,value]:restored.loop_counters_) if(address>=0x1000000U)
+        throw std::runtime_error{"invalid saved map loop address"};
+    for(const auto& [address,value]:restored.native_memory_) if(address>=0x1000000U)
+        throw std::runtime_error{"invalid saved native memory address"};
+    restored.cpu_.load_state(cpu_state);
+    static_assert(std::is_nothrow_move_assignable_v<MapVm>);
+    *this=std::move(restored);
 }
 
 void MapVm::start(std::uint32_t address, ObjectHandle player) {
@@ -261,6 +308,19 @@ std::optional<std::array<std::int16_t, 2>> MapVm::background_scroll_override() c
     return std::array{
         std::bit_cast<std::int16_t>(read_native_word(background_scroll_requested_x_)),
         std::bit_cast<std::int16_t>(read_native_word(background_scroll_requested_y_))};
+}
+
+std::optional<std::array<std::int16_t, 2>> MapVm::peek_background_scroll_override() const noexcept {
+    if(!background_scroll_override_address_ || !background_scroll_requested_x_ || !background_scroll_requested_y_) return std::nullopt;
+    const auto enabled=peek_ram_byte(background_scroll_override_address_);
+    if(!enabled || !*enabled) return std::nullopt;
+    const auto x=peek_ram_word(background_scroll_requested_x_),y=peek_ram_word(background_scroll_requested_y_);
+    if(!x || !y) return std::nullopt;
+    return std::array{std::bit_cast<std::int16_t>(*x),std::bit_cast<std::int16_t>(*y)};
+}
+
+void MapVm::refresh_background_metadata() {
+    cpu_.refresh_background_metadata();
 }
 
 void MapVm::tick_video_phase() {
@@ -364,17 +424,27 @@ void MapVm::sync_map_state_to_cpu() {
         write_native_byte(map_addresses_address_ + offset, 0);
         write_native_byte(map_loops_address_ + offset, 0);
     }
-    std::size_t loop_index = 0;
+    // Hash-table bucket order changes after state reconstruction. Select the
+    // same four source slots by address on both ordinary and restored runs.
+    std::array<std::uint32_t,4> loop_addresses{};
+    std::size_t loop_count{};
     for (const auto& [address, count] : loop_counters_) {
-        if (loop_index == 4U) break;
+        const auto at=std::lower_bound(loop_addresses.begin(),loop_addresses.begin()+loop_count,address);
+        if (at==loop_addresses.end()) continue;
+        loop_count=std::min(loop_count+1U,loop_addresses.size());
+        std::move_backward(at,loop_addresses.begin()+loop_count-1U,loop_addresses.begin()+loop_count);
+        *at=address;
+    }
+    for (std::size_t loop_index=0;loop_index<loop_count;++loop_index) {
+        const auto address=loop_addresses[loop_index];
+        const auto count=loop_counters_.at(address);
         const auto offset = static_cast<std::uint32_t>(loop_index * 2U);
         write_native_word(map_addresses_address_ + offset,
                           static_cast<std::uint16_t>(address & 0x7fffU));
         write_native_word(map_loops_address_ + offset, count);
-        ++loop_index;
     }
     write_native_word(number_map_loops_address_,
-                      static_cast<std::uint16_t>(loop_index * 2U));
+                      static_cast<std::uint16_t>(loop_count * 2U));
     write_native_word(current_background_address_, background_);
 }
 

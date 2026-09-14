@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 namespace starfox::simulation {
 
@@ -12,6 +14,7 @@ inline constexpr std::size_t kNormalDustPoints = 120U;
 inline constexpr std::size_t kMaximumDustPoints = 511U;
 
 struct DustPoint {
+    [[nodiscard]] bool operator==(const DustPoint&) const = default;
     std::int16_t x{};
     std::int16_t y{};
     std::int16_t z{};
@@ -25,6 +28,8 @@ public:
     DustSystem() noexcept { reset(); }
 
     void reset() noexcept;
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    void load_state(std::span<const std::uint8_t> bytes);
     void tick(
         const std::array<std::int16_t, 3>& camera,
         const MatrixQ15& world_matrix,

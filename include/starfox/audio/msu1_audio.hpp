@@ -35,6 +35,10 @@ public:
         std::span<const simulation::MsuRegisterWrite> writes);
     [[nodiscard]] std::span<const std::int16_t> render(
         std::size_t output_frames, std::uint32_t output_sample_rate);
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    // Reloads the cached track through this device's loader; rejects changed
+    // or missing assets transactionally. PCM buffers are not embedded.
+    void load_state(std::span<const std::uint8_t> bytes);
 
 private:
     bool load_selected_track();
@@ -51,6 +55,7 @@ private:
     double normalization_gain_{1.0};
     std::uint16_t selected_track_{};
     std::uint16_t loaded_track_{};
+    std::uint32_t loaded_crc_{};
     std::uint8_t volume_{255U};
     bool enabled_{};
     bool paused_{};

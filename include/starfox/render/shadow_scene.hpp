@@ -72,6 +72,30 @@ class Scene {
         return index;
     }
 public:
+    // Explicit 16-byte lanes shared with portable compute shaders. Bounds are
+    // rounded outward so converting the BVH to float cannot discard a caster.
+    struct GpuNode {
+        float low[3]; std::uint32_t begin;
+        float high[3]; std::uint32_t count;
+        std::uint32_t left, right, axis, reserved;
+    };
+    struct GpuTriangle { float origin[4], edge1[4], edge2[4]; };
+    bool pack_gpu(std::vector<GpuNode>& nodes, std::vector<GpuTriangle>& triangles) const {
+        if (!ready_ || nodes_.size()>UINT32_MAX || triangles_.size()>UINT32_MAX) return false;
+        nodes.clear(); triangles.clear();
+        nodes.reserve(nodes_.size()); triangles.reserve(triangles_.size());
+        const auto lower=[](double x){return std::nextafter(float(x),-INFINITY);};
+        const auto upper=[](double x){return std::nextafter(float(x),INFINITY);};
+        for (const auto& n:nodes_) nodes.push_back({
+            {lower(n.bounds.low.x),lower(n.bounds.low.y),lower(n.bounds.low.z)},std::uint32_t(n.begin),
+            {upper(n.bounds.high.x),upper(n.bounds.high.y),upper(n.bounds.high.z)},std::uint32_t(n.count),
+            std::uint32_t(n.left),std::uint32_t(n.right),n.axis,0});
+        for (const auto& t:prepared_) triangles.push_back({
+            {float(t.origin.x),float(t.origin.y),float(t.origin.z),float(t.scale)},
+            {float(t.edge1.x),float(t.edge1.y),float(t.edge1.z),0},
+            {float(t.edge2.x),float(t.edge2.y),float(t.edge2.z),0}});
+        return true;
+    }
     struct DirectionQuery {
         Vec3 direction;
         std::vector<PreparedDirection> triangles;

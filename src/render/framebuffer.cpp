@@ -109,6 +109,7 @@ void composite_transparent_layer(const Framebuffer& source,
                 const auto colour = source_pixels[source_index];
                 if (colour != 0U) {
                     destination_pixels[destination_index] = colour;
+                    destination.mark_written(destination_index);
                     if (transfer_tags) {
                         destination_tags[destination_index] = source_tagged
                             ? source_tags[source_index] : geometry_tag;

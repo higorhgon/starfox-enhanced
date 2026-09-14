@@ -5,6 +5,7 @@
 #include "starfox/render/software_renderer.hpp"
 
 #include <cstdint>
+#include <array>
 #include <cstddef>
 #include <optional>
 #include <string_view>
@@ -20,6 +21,17 @@ inline constexpr std::uint8_t briefing_text_palette_base = 6U * 16U;
 // with a host font.
 class ScaledTextRenderer {
 public:
+    struct ProjectedFrame {
+        std::vector<std::array<std::uint16_t,16>> glyphs;
+        RenderPose pose{};
+        std::int32_t character_size{};
+        std::uint8_t colour{};
+    };
+    [[nodiscard]] ProjectedFrame prepare_projected(std::uint16_t message_pointer,
+        std::uint8_t colour,std::int8_t size_adjustment,const RenderPose&,
+        std::uint8_t colour_index_base=7U*16U) const;
+    static void draw_projected(const ProjectedFrame&,Framebuffer&);
+    // English (Europe), ID 5, shares the original English text/font path.
     void set_language(std::uint8_t language) noexcept { language_ = language < 5 ? language : 0; }
     ScaledTextRenderer(
         const assets::RomImage& rom,
@@ -52,7 +64,8 @@ public:
         std::int32_t y,
         Framebuffer& target,
         std::uint8_t colour_index_base = 7U * 16U,
-        bool alternate_portraits = false) const;
+        bool alternate_portraits = false,
+        bool correct_pixel_aspect = false) const;
 
     void draw_ascii(
         std::string_view text,

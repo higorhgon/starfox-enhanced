@@ -21,6 +21,7 @@ struct StrategyTickStats {
 // presentation; this compatibility core preserves strategy behavior while
 // routines are translated and equivalence-tested individually.
 class NativeStrategyScheduler {
+    friend class GameSimulation;
 public:
     NativeStrategyScheduler(
         const assets::SymbolMap& symbols,
