@@ -62,13 +62,104 @@ temporary keys, so upgrading from those builds requires a one-time reinstall.
 **Back up saves and settings before uninstalling.** Later public builds will
 retain the permanent signing certificate.
 
+## PortMaster / Anbernic H700 (muOS)
+
+Packaging files for [PortMaster](https://portmaster.games/) live under
+[`portmaster/`](portmaster/), targeting the Anbernic **RG34XX / RG34XX H /
+RG34XXSP** family (H700 chipset, Mali-G31 GPU, 720x480 physical panel — a
+3:2 aspect ratio). **This target is unverified on real hardware**; it has
+only been built and exercised in a Linux x86_64 sandbox. Treat it as a
+starting point for a maintainer with the hardware to test on, not a
+finished, confirmed-working port.
+
+- **ROM requirement:** exactly the same as every other platform above — no
+  ROM is bundled. You need your own legally obtained, unmodified retail
+  Star Fox/Starwing ROM (see "Supported ROMs"). Never redistribute a
+  package that already contains one.
+- **3:2 display mode:** a new `DisplayMode` (3 BY 2 WIDE, alongside the
+  existing 4:3/16:9/16:10/21:9/32:9 options) matches the RG34XX family's
+  native panel instead of stretching or letterboxing a 4:3 image. Its HUD
+  layout profile reuses the 4:3 profile's (zero) offsets, since there is no
+  way to hand-tune pixel placement without the actual hardware in front of
+  you; expect to nudge HUD elements yourself with the in-game HUD editor if
+  anything looks off.
+- **GPU/driver note:** this runtime is built on SDL3's GPU API. Its default
+  "GPU" renderer requests Vulkan (`SDL_GPU_SHADERFORMAT_SPIRV`) on Linux,
+  with an automatic fallback to SDL's native renderer if that device fails
+  to create; the separate "Software" renderer option (Options → Renderer)
+  forces a pure CPU rasterizer that needs no GPU driver support at all. The
+  H700's Mali-G31 uses Mesa's Panfrost driver stack, whose Vulkan support
+  (`panvk`) for this GPU is still comparatively new/limited; if the GPU
+  renderer misbehaves or fails to start, switch to Software in Options.
+- **Fullscreen:** the desktop build normally opens windowed and only
+  toggles fullscreen via Alt+Enter on a keyboard, which most handhelds
+  don't have. This port adds a small, real opt-in for that:
+  `STARFOX_START_FULLSCREEN=1` (set by the packaged launcher) starts the
+  window in borderless fullscreen at whatever resolution the display is
+  already running, i.e. muOS's native 720x480 mode — there is no separate
+  CLI flag or persisted setting for it.
+
+### Build, package and install
+
+1. Build `starfox_pc` for aarch64 (natively on aarch64 hardware, or with a
+   cross toolchain) using [`tools/build_linux.sh`](tools/build_linux.sh),
+   the same script the Linux x64 CI job uses. The CI's own
+   `linux-arm64` workflow job only validates that this compiles and that
+   the ROM-independent test suite passes on aarch64; it does not produce a
+   distributable binary, since actually playing the game needs your ROM,
+   which CI does not have.
+2. Run [`tools/package_portmaster.sh`](tools/package_portmaster.sh)
+   against that build's install directory to assemble the zip:
+   ```sh
+   tools/package_portmaster.sh /path/to/aarch64/install StarFoxEnhanced-portmaster.zip
+   ```
+   This produces the standard PortMaster shape (`StarFoxEnhanced.sh` and
+   `port.json` at the zip root, a `StarFoxEnhanced/` folder with the binary
+   and a default `pregame.cfg` that selects the 3:2 display mode, native
+   render scale, and turns off the on-screen touch overlay since the
+   handheld has physical controls) plus an empty `StarFoxEnhanced/roms/`
+   folder for your ROM.
+3. Add your own ROM at `StarFoxEnhanced/roms/sf.sfc` inside the extracted
+   package (matching what `portmaster/StarFoxEnhanced.sh` points
+   `STARFOX_RETAIL_ROM` at).
+4. On the muOS device: install [PortMaster](https://portmaster.games/)
+   itself first if you haven't already (its own zip goes in `/ARCHIVE/` on
+   the SD card, then **Applications → Archive Manager** extracts it).
+   Ports are then split across two folders on the SD card: the port's game
+   folder goes under `ports/`, and its launcher `.sh` goes under
+   `roms/Ports/` (muOS lists that folder as a launchable system) — copy
+   this package's `StarFoxEnhanced/` folder and `StarFoxEnhanced.sh`
+   accordingly, or use muOS's built-in PortMaster app to install the zip
+   directly if that flow is available on your muOS version. Folder naming
+   has shifted across muOS releases, so cross-check against PortMaster's
+   own current install instructions if this doesn't match what you see.
+5. Controller input uses SDL3 gamepad support already built into the
+   runtime (`src/app/runtime_input.cpp`) — no `gptokeyb`/keyboard-emulation
+   layer is used or needed.
+
+### What is and isn't verified
+
+Verified in this sandbox: the new `DisplayMode::widescreen_3_2` value
+compiles, every switch/table that enumerates display modes was updated for
+it (grepped exhaustively), the full native x86_64 `STARFOX_BUILD_TESTS=ON`
+suite passes (22/22 `ctest` targets, including the pre-game display-cycle
+test extended for the new mode and a HUD-layout-migration test fixed for
+the profile-count change), and `portmaster/default-pregame.cfg` round-trips
+through the real `load_pregame_settings` parser with `display_mode` == 5.
+
+Not verified, because no ROM and no H700 hardware are available here:
+actual gameplay, HUD pixel placement in the new 3:2 mode (its layout
+profile is a placeholder reusing 4:3's zero offsets, not hand-tuned),
+Vulkan/Panfrost behavior on Mali-G31, fullscreen/resolution behavior on a
+real muOS install, controller mapping on RG34XX hardware, and performance.
+
 ## Features and settings
 
 - **Original and EX:** original routes and frontend flow, plus EX's shipped
   campaigns, native options and mechanics.
 - **Smooth presentation:** 20–480 FPS choices, defaulting to 60. Game pace is
   independent of render FPS; Original Speed preserves source-style slowdown.
-- **Display:** 4:3, 16:10, 16:9, 21:9 and 32:9; GPU or software presentation.
+- **Display:** 4:3, 16:10, 16:9, 21:9, 32:9 and 3:2; GPU or software presentation.
 - **Languages:** English, English (Europe), Japanese, German, French and Spanish, including menus
   and dialogue. EX translations include authored additions.
 - **2D Options:** artwork filtering, 2D Bloom, World Effects and their intensity.
