@@ -108,8 +108,8 @@ Enhanced Lighting and Anti-Aliasing remain independent options. For diagnostics,
 using the game's actual HUD artwork. Lives, Shield, Bombs/Boost, Comms, and the
 Boss Health bar can each be dragged independently; `RESET` (or Y) restores the
 current display mode's defaults. Layouts are independent for 4:3,
-16:9, 16:10, 21:9, and 32:9, with separate Original and Star Fox EX layouts
-for every size. They save automatically to
+16:9, 16:10, 21:9, 32:9, and 3:2, with separate Original and Star Fox EX
+layouts for every size. They save automatically to
 `hud-layout.cfg` beside the desktop executable.
 Game pace, render FPS, display mode, renderer, graphics choices, MSU-1 music,
 rumble, music/SFX volumes, God Mode, the FPS counter, and crosshair colour
@@ -125,10 +125,11 @@ always win, and originals are not deleted. The working directory does not affect
 save locations. Mobile and console packages retain their writable platform
 storage because their executable/package directories may be read-only.
 Standard display uses the complete 256x224 raster; Widescreen 16:9,
-Widescreen 16:10, Ultrawide 21:9, and Super Ultrawide 32:9 expand the intro
-and gameplay scene to 400x224, 360x224, 520x224, and 800x224 respectively
-while keeping cartridge-authored HUD, dialogue, title, map, and control-screen
-artwork centred in their original safe area. All modes use nearest-neighbor scaling
+Widescreen 16:10, Ultrawide 21:9, Super Ultrawide 32:9, and Widescreen 3:2
+expand the intro and gameplay scene to 400x224, 360x224, 520x224, 800x224,
+and 336x224 respectively while keeping cartridge-authored HUD, dialogue,
+title, map, and control-screen artwork centred in their original safe area.
+All modes use nearest-neighbor scaling
 in a resizable window. It is a hybrid source port: a pinned 65C816 core
 executes bounded original routines while timing, asset decoding, simulation
 orchestration, rendering, audio output, and presentation are native C++.

@@ -92,7 +92,7 @@ std::unique_ptr<GameSimulation> GameSimulation::restored_state(
         || !valid_enum(result->pregame_page_, PregamePage::cheats)
         || !valid_enum(result->experience_, Experience::starfox_ex)
         || !valid_enum(result->timing_mode_, TimingMode::original_speed)
-        || !valid_enum(result->display_mode_, DisplayMode::super_ultrawide_32_9)
+        || !valid_enum(result->display_mode_, DisplayMode::widescreen_3_2)
         || !valid_enum(result->renderer_mode_, RendererMode::software)
         || !valid_enum(result->render_scale_, RenderScale::scale_4x)
         || !valid_enum(result->crosshair_colour_, CrosshairColour::orange)

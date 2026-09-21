@@ -32,9 +32,9 @@ struct HudLayout {
 };
 
 // Original and Star Fox EX each own an independent profile for 4:3, 16:9,
-// 16:10, 21:9, and 32:9. The first five entries are Original and the second
-// five are EX, with each group ordered like simulation::DisplayMode.
-inline constexpr std::size_t hud_display_profile_count = 5U;
+// 16:10, 21:9, 32:9, and 3:2. The first six entries are Original and the
+// second six are EX, with each group ordered like simulation::DisplayMode.
+inline constexpr std::size_t hud_display_profile_count = 6U;
 inline constexpr std::size_t hud_experience_profile_count = 2U;
 using HudLayoutProfiles = std::array<HudLayout,
     hud_display_profile_count * hud_experience_profile_count>;
