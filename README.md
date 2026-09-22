@@ -101,17 +101,26 @@ finished, confirmed-working port.
 
 ### Build, package and install
 
-1. Build `starfox_pc` for aarch64 (natively on aarch64 hardware, or with a
-   cross toolchain) using [`tools/build_linux.sh`](tools/build_linux.sh),
-   the same script the Linux x64 CI job uses. The CI's own
-   `linux-arm64` workflow job only validates that this compiles and that
-   the ROM-independent test suite passes on aarch64; it does not produce a
-   distributable binary, since actually playing the game needs your ROM,
-   which CI does not have.
-2. Run [`tools/package_portmaster.sh`](tools/package_portmaster.sh)
-   against that build's install directory to assemble the zip:
+1. **Automated (recommended):** unlike FZeroSNESRecomp/SuperMarioWorldRecomp,
+   `starfox_pc` is a hand-written C++ reimplementation, not code statically
+   recompiled from your ROM — so building it needs no ROM at all, and the
+   `linux-arm64` job in
+   [`.github/workflows/portable-builds.yml`](.github/workflows/portable-builds.yml)
+   now builds, tests, packages, and uploads a ready-to-use
+   `StarFoxEnhanced-portmaster-h700.zip` as a run artifact, entirely on
+   GitHub-hosted infrastructure. Go to **Actions → Portable platform
+   builds → Run workflow** on this fork, wait for the `linux-arm64` job, and
+   download the artifact from the run summary. No self-hosted runner needed
+   for this game.
+2. **Manual (equivalent, for local iteration):** build `starfox_pc` for
+   aarch64 yourself (natively on aarch64 hardware, or with a cross
+   toolchain) using [`tools/build_linux.sh`](tools/build_linux.sh), the same
+   script the CI job above calls, then run
+   [`tools/package_portmaster.sh`](tools/package_portmaster.sh) against that
+   build's install directory to assemble the zip:
    ```sh
-   tools/package_portmaster.sh /path/to/aarch64/install StarFoxEnhanced-portmaster.zip
+   tools/build_linux.sh . /tmp/build-arm64 dist/StarFoxEnhanced-linux-arm64
+   tools/package_portmaster.sh dist/StarFoxEnhanced-linux-arm64 StarFoxEnhanced-portmaster.zip
    ```
    This produces the standard PortMaster shape (`StarFoxEnhanced.sh` and
    `port.json` at the zip root, a `StarFoxEnhanced/` folder with the binary
@@ -121,7 +130,9 @@ finished, confirmed-working port.
    folder for your ROM.
 3. Add your own ROM at `StarFoxEnhanced/roms/sf.sfc` inside the extracted
    package (matching what `portmaster/StarFoxEnhanced.sh` points
-   `STARFOX_RETAIL_ROM` at).
+   `STARFOX_RETAIL_ROM` at). Neither the CI artifact nor the manual zip ever
+   contains a ROM — the CI job actively checks for and refuses to publish
+   one.
 4. On the muOS device: install [PortMaster](https://portmaster.games/)
    itself first if you haven't already (its own zip goes in `/ARCHIVE/` on
    the SD card, then **Applications → Archive Manager** extracts it).
