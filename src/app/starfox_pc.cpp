@@ -106,6 +106,9 @@ constexpr std::uint32_t widescreen_16_9_width = 400U;
 constexpr std::uint32_t widescreen_16_10_width = 360U;
 constexpr std::uint32_t ultrawide_width = 520U;
 constexpr std::uint32_t super_ultrawide_width = 800U;
+// 1.5 * snes_height (224), matching how the other widescreen canvases scale
+// the native raster width to their target aspect ratio at the same height.
+constexpr std::uint32_t widescreen_3_2_width = 336U;
 constexpr std::uint32_t superfx_height = 192U;
 constexpr std::int32_t superfx_offset_y = 16;
 constexpr std::uint32_t superfx_ui_width = 224U;
@@ -309,6 +312,8 @@ std::uint32_t display_width_for(
         return ultrawide_width;
     case starfox::simulation::DisplayMode::super_ultrawide_32_9:
         return super_ultrawide_width;
+    case starfox::simulation::DisplayMode::widescreen_3_2:
+        return widescreen_3_2_width;
     case starfox::simulation::DisplayMode::standard_4_3:
     default:
         return snes_width;
@@ -332,6 +337,9 @@ std::size_t hud_profile_index(
     case starfox::simulation::DisplayMode::super_ultrawide_32_9:
         result = 4U;
         break;
+    case starfox::simulation::DisplayMode::widescreen_3_2:
+        result = 5U;
+        break;
     case starfox::simulation::DisplayMode::standard_4_3:
     default:
         break;
@@ -353,6 +361,8 @@ std::string_view display_profile_name(
         return "21 BY 9";
     case starfox::simulation::DisplayMode::super_ultrawide_32_9:
         return "32 BY 9";
+    case starfox::simulation::DisplayMode::widescreen_3_2:
+        return "3 BY 2";
     case starfox::simulation::DisplayMode::standard_4_3:
     default:
         return "4 BY 3";
@@ -1281,7 +1291,17 @@ public:
 #if defined(STARFOX_UWP) || defined(__ANDROID__)
         constexpr auto window_flags = SDL_WINDOW_FULLSCREEN;
 #else
-        constexpr auto window_flags = SDL_WINDOW_RESIZABLE;
+        // Desktop builds default to a resizable window. Handheld/PortMaster
+        // deployments run without window manager decorations and benefit
+        // from starting fullscreen instead; STARFOX_START_FULLSCREEN opts
+        // in without changing the default desktop experience. With no
+        // explicit SDL_SetWindowFullscreenMode() call, SDL3 uses borderless
+        // "fullscreen desktop" sizing, so this adopts whatever resolution
+        // the display is already running at (e.g. a handheld's native panel
+        // mode set by the OS) instead of this code needing to know it.
+        const auto window_flags = static_cast<SDL_WindowFlags>(
+            SDL_WINDOW_RESIZABLE
+            | (std::getenv("STARFOX_START_FULLSCREEN") ? SDL_WINDOW_FULLSCREEN : 0));
 #endif
         window_ = SDL_CreateWindow(
             "Star Fox Enhanced - native PC runtime", 1024, 896,
@@ -4796,7 +4816,7 @@ int main(int argc, char** argv) {
                     "STARFOX_TEST_DISPLAY_MODE")) {
                 game.set_display_mode(static_cast<
                     starfox::simulation::DisplayMode>(std::clamp(
-                        std::stoi(forced_display), 0, 4)));
+                        std::stoi(forced_display), 0, 5)));
             }
             game.set_god_mode(saved_pregame.god_mode);
             game.set_show_fps(saved_pregame.show_fps);
@@ -5158,6 +5178,9 @@ int main(int argc, char** argv) {
             } else if (mode == "32_9") {
                 game.set_display_mode(
                     starfox::simulation::DisplayMode::super_ultrawide_32_9);
+            } else if (mode == "3_2") {
+                game.set_display_mode(
+                    starfox::simulation::DisplayMode::widescreen_3_2);
             }
         }
         const auto suppress_configurable_hud =
@@ -9270,6 +9293,8 @@ int main(int argc, char** argv) {
                                 return "21 BY 9 ULTRA";
                             case starfox::simulation::DisplayMode::super_ultrawide_32_9:
                                 return "32 BY 9 SUPER";
+                            case starfox::simulation::DisplayMode::widescreen_3_2:
+                                return "3 BY 2 WIDE";
                             case starfox::simulation::DisplayMode::standard_4_3:
                             default:
                                 return "4 BY 3 STANDARD";

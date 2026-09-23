@@ -63,6 +63,14 @@ enum class DisplayMode {
     widescreen_16_10,
     ultrawide_21_9,
     super_ultrawide_32_9,
+    // Appended after the original five values. This enum is persisted as a
+    // raw uint8_t index in pregame.cfg and in save-state archives, so new
+    // values must always be appended here, never inserted or reordered, or
+    // existing users' saved settings will be silently corrupted. 3:2 (1.5) is
+    // a mild widescreen ratio, narrower than 16:10 (1.6) but wider than 4:3
+    // (1.333); it matches the native 720x480 panel used by the Anbernic
+    // RG34XX/RG34XXSP handheld family.
+    widescreen_3_2,
 };
 
 enum class RendererMode : std::uint8_t {

@@ -225,10 +225,10 @@ constexpr std::array<std::string_view, 5> kHudElementNames{
     "LIVES", "SHIELD", "BOMBS_BOOST", "COMMS", "BOSS_HEALTH"};
 constexpr std::array<std::string_view, 5> kLegacyHudProfileNames{
     "4_3", "16_9", "16_10", "21_9", "32_9"};
-constexpr std::array<std::string_view, 10> kHudProfileNames{
+constexpr std::array<std::string_view, 12> kHudProfileNames{
     "ORIGINAL_4_3", "ORIGINAL_16_9", "ORIGINAL_16_10", "ORIGINAL_21_9",
-    "ORIGINAL_32_9", "EX_4_3", "EX_16_9", "EX_16_10", "EX_21_9",
-    "EX_32_9"};
+    "ORIGINAL_32_9", "ORIGINAL_3_2", "EX_4_3", "EX_16_9", "EX_16_10",
+    "EX_21_9", "EX_32_9", "EX_3_2"};
 
 void add_keyboard_button(
     input::ButtonMask& result,
@@ -717,7 +717,7 @@ bool load_pregame_settings(
             found[1] = std::find(valid.begin(), valid.end(), value) != valid.end();
         } else if (name == "DISPLAY_MODE") {
             loaded.display_mode = static_cast<std::uint8_t>(value);
-            found[2] = value >= 0 && value <= 4;
+            found[2] = value >= 0 && value <= 5;
         } else if (name == "GOD_MODE") {
             loaded.god_mode = value != 0;
             found[3] = value == 0 || value == 1;
@@ -853,7 +853,7 @@ bool save_pregame_settings(
     const std::filesystem::path& path,
     const PregameSettings& settings) noexcept {
     if (path.empty() || settings.timing_mode > 1U
-        || settings.display_mode > 4U || settings.crosshair_colour > 7U
+        || settings.display_mode > 5U || settings.crosshair_colour > 7U
         || settings.anti_aliasing > 3U || settings.rtx_lighting > 3U
         || settings.two_d_filter > 5U || settings.effect >= render::effect_count
         || settings.effect_intensity > 100U || settings.renderer_mode > 1U
@@ -990,9 +990,16 @@ bool load_hud_layout(
     if (!(input >> version)
         || (version != "SFE_HUD_LAYOUT_V2"
             && version != "SFE_HUD_LAYOUT_V3"
-            && version != "SFE_HUD_LAYOUT_V4")) return false;
+            && version != "SFE_HUD_LAYOUT_V4"
+            && version != "SFE_HUD_LAYOUT_V5")) return false;
     const auto legacy = version == "SFE_HUD_LAYOUT_V2";
-    const auto missing_boss_health = version != "SFE_HUD_LAYOUT_V4";
+    const auto missing_boss_health = version != "SFE_HUD_LAYOUT_V4"
+        && version != "SFE_HUD_LAYOUT_V5";
+    // Every format up through V4 predates the 3:2 display mode, so those
+    // files never wrote an ORIGINAL_3_2/EX_3_2 row. Without this, loading
+    // any such pre-existing file would fail the completeness check below
+    // and silently discard that user's saved HUD customizations.
+    const auto missing_3_2 = version != "SFE_HUD_LAYOUT_V5";
 
     auto loaded = render::HudLayoutProfiles{};
     std::array<std::array<bool, kHudElementNames.size()>,
@@ -1002,6 +1009,10 @@ bool load_hud_layout(
             profile[static_cast<std::size_t>(
                 render::HudElement::boss_health)] = true;
         }
+    }
+    if (missing_3_2) {
+        found[render::hud_display_profile_count - 1U].fill(true);
+        found[kHudProfileNames.size() - 1U].fill(true);
     }
     std::string profile;
     std::string name;
@@ -1055,7 +1066,7 @@ bool save_hud_layout(
     if (error) return false;
     std::ofstream output{path, std::ios::trunc};
     if (!output) return false;
-    output << "SFE_HUD_LAYOUT_V4\n";
+    output << "SFE_HUD_LAYOUT_V5\n";
     for (std::size_t profile = 0; profile < kHudProfileNames.size(); ++profile) {
         for (std::size_t index = 0; index < kHudElementNames.size(); ++index) {
             output << kHudProfileNames[profile] << ' '

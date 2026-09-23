@@ -612,9 +612,12 @@ int main() {
     loaded_layouts = {};
     require(starfox::app::load_hud_layout(layout_test_path, loaded_layouts)
                 && loaded_layouts[0][starfox::render::HudElement::lives].x == 1
-                && loaded_layouts[5][starfox::render::HudElement::lives].x == 1
+                && loaded_layouts[starfox::render::hud_display_profile_count]
+                    [starfox::render::HudElement::lives].x == 1
                 && loaded_layouts[4][starfox::render::HudElement::comms].x == 5
-                && loaded_layouts[9][starfox::render::HudElement::comms].x == 5,
+                && loaded_layouts[4
+                    + starfox::render::hud_display_profile_count]
+                    [starfox::render::HudElement::comms].x == 5,
             "legacy HUD layouts were not migrated into both experiences");
     std::error_code layout_remove_error;
     std::filesystem::remove(layout_test_path, layout_remove_error);

@@ -1,0 +1,30 @@
+{
+    "version": 2,
+    "name": "StarFoxEnhanced.zip",
+    "items": [
+        "StarFoxEnhanced.sh",
+        "StarFoxEnhanced/"
+    ],
+    "items_opt": null,
+    "attr": {
+        "title": "Star Fox Enhanced",
+        "desc": "Native C++/SDL3 port of the UltraStarFox Star Fox/Starwing romhack decompilation, with Original and Star Fox EX experiences, high-frame-rate presentation and widescreen support. Requires your own legally obtained retail ROM; none is bundled.",
+        "inst": "Copy your own supported, unmodified Star Fox (USA)/Starwing (Europe/Germany) ROM to StarFoxEnhanced/roms/sf.sfc before first launch. The game reconstructs its runtime assets from that ROM on first boot.",
+        "genres": [
+            "arcade",
+            "simulation"
+        ],
+        "porter": [
+            "higorhgon"
+        ],
+        "image": {},
+        "rtr": false,
+        "runtime": null,
+        "reqs": [
+            "sdl3"
+        ],
+        "arch": [
+            "aarch64"
+        ]
+    }
+}

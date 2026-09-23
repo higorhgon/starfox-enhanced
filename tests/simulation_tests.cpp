@@ -6942,12 +6942,16 @@ int main(int argc, char** argv) {
                 "pre-game display selector did not enable 32:9 super ultrawide");
         drive_boot({0, starfox::input::right, 0});
         require(boot_game.display_mode()
+                    == starfox::simulation::DisplayMode::widescreen_3_2,
+                "pre-game display selector did not place 3:2 after 32:9");
+        drive_boot({0, starfox::input::right, 0});
+        require(boot_game.display_mode()
                     == starfox::simulation::DisplayMode::standard_4_3,
                 "pre-game display selector did not wrap to standard mode");
         drive_boot({0, starfox::input::left, 0});
         require(boot_game.display_mode()
-                    == starfox::simulation::DisplayMode::super_ultrawide_32_9,
-                "pre-game display selector did not step backward to 32:9");
+                    == starfox::simulation::DisplayMode::widescreen_3_2,
+                "pre-game display selector did not step backward to 3:2");
         drive_boot({0, starfox::input::down, 0});
         require(boot_game.pregame_selection() == 4U,
                 "pre-game cursor did not reach RENDERER");

@@ -254,6 +254,76 @@ jobs:
           gh release upload "${tag}" \
             StarFoxEnhanced-0.0.6.7-linux-x64.zip --clobber
 
+  linux-arm64:
+    name: Linux arm64 build, test, and PortMaster packaging
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config zip \
+            libasound2-dev libpulse-dev libx11-dev libxext-dev \
+            libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libgl1-mesa-dev \
+            libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev \
+            libudev-dev
+      - name: Build, test, and install
+        # Unlike FZeroSNESRecomp/SuperMarioWorldRecomp (statically
+        # recompiled from the ROM's own CPU code, so they cannot build
+        # without a maintainer-owned ROM present), Star Fox Enhanced's game
+        # logic is a hand-written C++ reimplementation: starfox_pc builds
+        # and installs cleanly on a stock GitHub-hosted runner with no ROM
+        # anywhere in the picture. It only reconstructs its runtime assets
+        # from a ROM the *end user* supplies, at first launch on their own
+        # device. Reuses the exact same script as the linux-x64 job above.
+        shell: bash
+        run: |
+          chmod +x tools/build_linux.sh
+          tools/build_linux.sh "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/starfox-enhanced-linux-arm64" \
+            "$GITHUB_WORKSPACE/dist/StarFoxEnhanced-linux-arm64"
+      - name: Verify runtime
+        shell: bash
+        run: |
+          binary="dist/StarFoxEnhanced-linux-arm64/starfox_pc"
+          test -x "${binary}"
+          file "${binary}" | grep -q 'ELF 64-bit.*ARM aarch64'
+          ! ldd "${binary}" | grep -q 'not found'
+      - name: Package PortMaster zip for Anbernic H700 (muOS)
+        shell: bash
+        run: |
+          chmod +x tools/package_portmaster.sh
+          tools/package_portmaster.sh \
+            "dist/StarFoxEnhanced-linux-arm64" \
+            "$GITHUB_WORKSPACE/StarFoxEnhanced-portmaster-h700.zip"
+          # Guard rail: the zip must never contain a ROM. package_portmaster.sh
+          # ships an empty roms/ folder with a README, never a real dump, but
+          # this check fails the job loudly instead of silently shipping one
+          # if that ever regresses.
+          if unzip -Z1 "$GITHUB_WORKSPACE/StarFoxEnhanced-portmaster-h700.zip" \
+              | grep -Ei '\.(sfc|smc)$'; then
+            echo "::error::The packaged zip contains what looks like a ROM file. Refusing to publish it." >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarFoxEnhanced-portmaster-h700
+          path: StarFoxEnhanced-portmaster-h700.zip
+          if-no-files-found: error
+      - name: Add to GitHub release
+        if: github.event_name == 'push' || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          gh release upload "${tag}" \
+            StarFoxEnhanced-portmaster-h700.zip --clobber
+
   macos-universal:
     name: macOS universal (unsigned)
     runs-on: macos-15
